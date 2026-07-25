@@ -76,6 +76,12 @@ install` to force something through to claude.
 Every option has an env-var equivalent, so both `bclaude -w ~/p` and
 `BCLAUDE_WORKSPACE=~/p bclaude` work.
 
+`BCLAUDE_WORKSPACE`, `BCLAUDE_VOLUME`, `BCLAUDE_AUTH_VOLUME` and `BCLAUDE_IMAGE`
+are read only under those names — bare `WORKSPACE`, `VOLUME`, `AUTH_VOLUME` and
+`IMAGE` are ignored. They are common words to have exported for something else,
+and they pick what gets mounted and what `bclaude clean` deletes, so a stray
+`export IMAGE=` should not be able to aim `podman rmi -f` at your own image.
+
 | Option | Env | Default | Effect |
 | --- | --- | --- | --- |
 | `-w, --workspace DIR` | `BCLAUDE_WORKSPACE` | `$PWD` | Host dir mounted at `/work` — the only host path Claude can reach |
@@ -95,7 +101,7 @@ Every option has an env-var equivalent, so both `bclaude -w ~/p` and
 | `--rebuild` / `--no-cache` | | off | Rebuild the image before running |
 | `--no-autobuild` | `BCLAUDE_AUTOBUILD=0` | off | Fail instead of auto-building a missing/stale image |
 | `--dry-run` | | off | Print the `podman` command instead of running it |
-| | `ANTHROPIC_API_KEY` | unset | Forwarded into the container if set |
+| | `ANTHROPIC_API_KEY` | unset | Forwarded into the container if set — by name, so the value stays out of the `podman` command line |
 
 ## How it's wired
 
@@ -106,9 +112,12 @@ Every option has an env-var equivalent, so both `bclaude -w ~/p` and
   is throwaway container fs. `--ro` mounts it read-only for analysis and review
   sessions — Claude keeps working (the config volume and `/tmp` stay writable),
   it just cannot change your files.
-- **`--userns=keep-id`** maps container uid 1000 → your host user, so files
-  Claude writes in `/work` are owned by you (why the image renames `node` →
-  `claude`).
+- **`--userns=keep-id:uid=1000,gid=1000`** maps your host user onto the image's
+  `claude` user (uid/gid 1000), so files Claude writes in `/work` are owned by
+  you (why the image renames `node` → `claude`). The `uid=`/`gid=` part matters
+  whenever your host uid is not 1000: plain `keep-id` would map you to your own
+  number instead, leaving the container process — still uid 1000, from the
+  image's `USER` — unable to write a workspace owned by you.
 - **Config** lives in the `bclaude-config` volume at `/home/claude/.claude`,
   separate from your host `~/.claude` — one volume shared by every project, or
   one per project with `--volume-per-project`. The login is not in there: it
@@ -119,7 +128,7 @@ Every option has an env-var equivalent, so both `bclaude -w ~/p` and
   memory/cpu caps, `nosuid` tmpfs `/tmp`, setuid stripped from all but `sudo`.
 - **Image freshness** the image is stamped with a hash of the embedded
   Containerfile + entrypoint. Edit the script and the next run rebuilds itself.
-- **Portability** SELinux hosts get the `,z` mount relabel automatically; hosts
+- **Portability** SELinux hosts get the `:z` mount relabel automatically; hosts
   that can't enforce rootless cgroup limits get them dropped with a warning
   instead of a podman error; a TTY is only requested when there is one, so
   `bclaude -p ...` works in pipes and CI.
@@ -149,7 +158,9 @@ bclaude clean --prune             # drop volumes whose project directory is gone
 Claude Code only knows about one config directory, so the entrypoint copies the
 login in from the auth volume at startup and writes it back out when the session
 ends — the token gets refreshed while you work, and that refresh has to reach
-your other projects. Two sessions running at once means last writer wins.
+your other projects. It writes back only a token this session actually changed,
+and stands aside if a session that started alongside it refreshed after it began,
+so running several at once does not put a spent token back over a live one.
 
 Volumes bclaude creates are labelled (`org.bclaude.managed`, `org.bclaude.role`,
 and the project path for per-project ones), which is how `--list` and `--prune`

@@ -147,6 +147,97 @@ check_not_contains "--no-git-config drops the gitconfig mount" ".gitconfig" -- \
 check_contains "run forces claude subcommands through" "latest install" -- \
     "$BCLAUDE" --dry-run run install
 
+section "SELinux relabelling (--dry-run)"
+
+# On an SELinux-enforcing host every bind mount needs the relabel option. The
+# option belongs in the option list after a colon: ":z" on a mount that has no
+# other options, ",z" appended on one that does. Getting that wrong by pasting
+# ",z" onto an optionless mount is silent and severe — podman reads "/work,z" as
+# the destination path, so the workspace mounts somewhere nobody looks and the
+# empty /work from the image is what Claude sees. Same for both volumes, which
+# is the login not persisting. A stub getenforce stands in for such a host.
+selinuxbin="$(mktemp -d)"
+printf '#!/bin/sh\necho Enforcing\n' > "$selinuxbin/getenforce"
+chmod +x "$selinuxbin/getenforce"
+enforcing() { PATH="$selinuxbin:$PATH" "$@"; }
+
+check_contains "workspace gets :z when enforcing" ":/work:z" -- \
+    enforcing "$BCLAUDE" --dry-run
+check_contains "config volume gets :z when enforcing" \
+    "bclaude-test-config:/home/claude/.claude:z" -- enforcing "$BCLAUDE" --dry-run
+check_contains "auth volume gets :z when enforcing" \
+    "bclaude-test-auth:/home/claude/.claude-auth:z" -- enforcing "$BCLAUDE" --dry-run
+
+# The bug these three guard against: a relabel option concatenated onto the
+# destination path instead of into the option list.
+check_not_contains "workspace destination is not /work,z" '/work\,z' -- \
+    enforcing "$BCLAUDE" --dry-run
+check_not_contains "config volume destination is not .claude,z" '.claude\,z' -- \
+    enforcing "$BCLAUDE" --dry-run
+check_not_contains "auth volume destination is not .claude-auth,z" '.claude-auth\,z' -- \
+    enforcing "$BCLAUDE" --dry-run
+
+# The workdir has to be the directory the workspace actually mounted on.
+check_contains "workdir matches the workspace mount when enforcing" "--workdir /work " -- \
+    enforcing "$BCLAUDE" --dry-run
+
+# A mount that already has options appends with a comma instead.
+check_contains "read-only workspace appends the relabel" ':/work:ro\,z' -- \
+    enforcing "$BCLAUDE" --ro --dry-run
+selinuxcreds="$(mktemp)"; echo '{"x":1}' > "$selinuxcreds"
+check_contains "read-only seed mounts append the relabel" 'credentials.json:ro\,z' -- \
+    enforcing env HOST_CREDS="$selinuxcreds" "$BCLAUDE" --seed-creds --dry-run
+
+# And nothing is relabelled on a host that is not enforcing.
+check_not_contains "no relabel option without SELinux" ":z" -- "$BCLAUDE" --dry-run
+check_contains "workspace mounts bare without SELinux" ":/work " -- "$BCLAUDE" --dry-run
+rm -rf "$selinuxbin"; rm -f "$selinuxcreds"
+
+section "userns mapping"
+
+# The image runs as claude, uid 1000. Plain --userns=keep-id maps the caller to
+# their own numeric uid instead, which for any host uid other than 1000 leaves
+# the process unable to write a workspace owned by the caller.
+check_contains "host user is mapped onto the container's uid 1000" \
+    '--userns=keep-id:uid=1000\,gid=1000' -- "$BCLAUDE" --dry-run
+check_not_contains "plain keep-id is not used" "--userns=keep-id " -- "$BCLAUDE" --dry-run
+
+section "secret handling"
+
+# The key is forwarded by name so podman imports it from our environment. With
+# the value inline it would show up in ps output on a shared host, and --dry-run
+# would print it for pasting into a bug report.
+check_contains "the api key is forwarded by name, with no value attached" \
+    "--env ANTHROPIC_API_KEY " -- \
+    env ANTHROPIC_API_KEY=sk-ant-test-canary "$BCLAUDE" --dry-run
+check_not_contains "the api key value never reaches podman's argv" "sk-ant-test-canary" -- \
+    env ANTHROPIC_API_KEY=sk-ant-test-canary "$BCLAUDE" --dry-run
+
+section "generic env vars are not inherited"
+
+# IMAGE, WORKSPACE and VOLUME are ordinary words that projects and CI export for
+# their own purposes, and they decide what gets mounted and what `clean` deletes.
+# Only the BCLAUDE_ forms are read. The BCLAUDE_ ones this suite exports have to
+# come off for these, or they would mask the fallback being tested; every command
+# here only reads, so falling back to the real defaults is harmless.
+check_not_contains "a stray IMAGE export is ignored" "evil/img" -- \
+    env -u BCLAUDE_IMAGE IMAGE=evil/img:1 "$BCLAUDE" --dry-run
+check_contains "a stray IMAGE export falls back to the default" "localhost/bclaude:latest" -- \
+    env -u BCLAUDE_IMAGE IMAGE=evil/img:1 "$BCLAUDE" --dry-run
+check_not_contains "a stray WORKSPACE export is ignored" "/etc:/work" -- \
+    env WORKSPACE=/etc "$BCLAUDE" --dry-run
+check_not_contains "a stray VOLUME export is ignored" "evil-vol" -- \
+    env -u BCLAUDE_VOLUME VOLUME=evil-vol "$BCLAUDE" --dry-run
+check_not_contains "a stray AUTH_VOLUME export is ignored" "evil-auth" -- \
+    env -u BCLAUDE_AUTH_VOLUME AUTH_VOLUME=evil-auth "$BCLAUDE" --dry-run
+# This is the one that matters most: `clean` runs podman rmi -f on the resolved
+# image, and status reports the same resolution without deleting anything.
+check_contains "the image clean would delete ignores a stray IMAGE export" \
+    "image     : localhost/bclaude:latest" -- \
+    env -u BCLAUDE_IMAGE IMAGE=evil/img:1 "$BCLAUDE" status
+check_not_contains "the resolved workspace ignores a stray WORKSPACE export" \
+    "workspace : /etc" -- env WORKSPACE=/etc "$BCLAUDE" status
+
 section "shared auth volume"
 
 check_contains "the auth volume is mounted" "bclaude-test-auth:/home/claude/.claude-auth" -- \
@@ -169,6 +260,55 @@ check_contains "the entrypoint writes the login back out on exit" \
     "trap sync_auth_out EXIT" -- "$BCLAUDE" show entrypoint
 check_not_contains "the entrypoint no longer execs, so the trap can run" \
     'exec -- "$@"' -- "$BCLAUDE" show entrypoint
+
+section "login hand-off between overlapping sessions"
+
+# The auth volume is shared, so two sessions can be up at once and both start
+# from the same token. Writing the config dir back unconditionally on exit means
+# a session that never touched the token can put a spent one back over a newer
+# one and cost everybody a re-login. The entrypoint runs here directly, on the
+# host, with its two directories pointed at temp dirs — no podman needed.
+epfile="$(mktemp)"; "$BCLAUDE" show entrypoint > "$epfile"
+
+# ep_result <token-in-the-auth-volume> <shell-code-run-as-the-session>
+# Echoes what the auth volume holds after the session exits. The session's code
+# writing $CLAUDE_CONFIG_DIR/.credentials.json stands for claude refreshing the
+# token; writing $BCLAUDE_AUTH_DIR/.credentials.json stands for a concurrent
+# session refreshing and exiting while this one is still up.
+ep_run() {   # ep_run <auth-token> <session-code> <cfg|log>
+    local d; d="$(mktemp -d)"; mkdir -p "$d/cfg" "$d/auth"
+    [ -n "$1" ] && printf '%s' "$1" > "$d/auth/.credentials.json"
+    CLAUDE_CONFIG_DIR="$d/cfg" BCLAUDE_AUTH_DIR="$d/auth" HOME="$d" \
+        bash "$epfile" bash -c "$2" >"$d/out" 2>&1
+    case "$3" in
+        cfg) cat "$d/auth/.credentials.json" 2>/dev/null ;;
+        log) cat "$d/out" ;;
+    esac
+    rm -rf "$d"
+}
+ep_result() { ep_run "$1" "$2" cfg; }
+ep_log()    { ep_run "$1" "$2" log; }
+
+check_contains "a refreshed token reaches the auth volume" "C1" -- \
+    ep_result C0 'printf C1 > "$CLAUDE_CONFIG_DIR/.credentials.json"'
+check_contains "a first login reaches the auth volume" "C1" -- \
+    ep_result "" 'printf C1 > "$CLAUDE_CONFIG_DIR/.credentials.json"'
+check_contains "an unchanged session leaves the token alone" "C0" -- \
+    ep_result C0 'true'
+# The bug: this session never touched the token, so it must not undo the refresh
+# another session made while it was running.
+check_contains "an unchanged session does not restore a spent token over a newer one" "C1" -- \
+    ep_result C0 'printf C1 > "$BCLAUDE_AUTH_DIR/.credentials.json"'
+check_not_contains "the spent token is really gone" "C0" -- \
+    ep_result C0 'printf C1 > "$BCLAUDE_AUTH_DIR/.credentials.json"'
+# Both refreshed: the one that landed in the volume after we started is newer.
+check_contains "a concurrent refresh wins over ours" "C2" -- \
+    ep_result C0 'printf C1 > "$CLAUDE_CONFIG_DIR/.credentials.json"
+                  printf C2 > "$BCLAUDE_AUTH_DIR/.credentials.json"'
+check_contains "yielding to a concurrent refresh is reported" "keeping theirs" -- \
+    ep_log C0 'printf C1 > "$CLAUDE_CONFIG_DIR/.credentials.json"
+               printf C2 > "$BCLAUDE_AUTH_DIR/.credentials.json"'
+rm -f "$epfile"
 
 section "credential seeding"
 

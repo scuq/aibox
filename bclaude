@@ -18,16 +18,21 @@ BCLAUDE_URL="${BCLAUDE_URL:-https://raw.githubusercontent.com/torlenor/bclaude/m
 # ---------------------------------------------------------------------------
 # Defaults (every one of these can be overridden by env var or by a flag)
 # ---------------------------------------------------------------------------
-IMAGE="${BCLAUDE_IMAGE:-${IMAGE:-localhost/bclaude:latest}}"
-WORKSPACE="${BCLAUDE_WORKSPACE:-${WORKSPACE:-$PWD}}"
+# The four names below are read only from their BCLAUDE_ form, unlike the tuning
+# knobs further down. IMAGE, WORKSPACE and VOLUME are ordinary words that projects
+# and CI already export for their own purposes, and these four decide what gets
+# mounted and what `bclaude clean` deletes: inheriting a stray `export IMAGE=`
+# would aim `podman rmi -f` at somebody else's image.
+IMAGE="${BCLAUDE_IMAGE:-localhost/bclaude:latest}"
+WORKSPACE="${BCLAUDE_WORKSPACE:-$PWD}"
 VOLUME_DEFAULT="bclaude-config"
 VOLUME_EXPLICIT=""                           # 1 when the volume was named by hand
-if [ -n "${BCLAUDE_VOLUME:-${VOLUME:-}}" ]; then VOLUME_EXPLICIT=1; fi
-VOLUME="${BCLAUDE_VOLUME:-${VOLUME:-$VOLUME_DEFAULT}}"
+if [ -n "${BCLAUDE_VOLUME:-}" ]; then VOLUME_EXPLICIT=1; fi
+VOLUME="${BCLAUDE_VOLUME:-$VOLUME_DEFAULT}"
 VOLUME_PER_PROJECT="${BCLAUDE_VOLUME_PER_PROJECT:-}"
 # The login lives apart from the rest of the config, in one volume shared by
 # every project, so per-project config volumes don't mean logging in per project.
-AUTH_VOLUME="${BCLAUDE_AUTH_VOLUME:-${AUTH_VOLUME:-bclaude-auth}}"
+AUTH_VOLUME="${BCLAUDE_AUTH_VOLUME:-bclaude-auth}"
 AUTH_DIR="/home/claude/.claude-auth"
 HOST_CREDS="${HOST_CREDS:-$HOME/.claude/.credentials.json}"
 CLAUDE_VERSION="${CLAUDE_VERSION:-latest}"   # npm tag/version baked into the image
@@ -44,6 +49,13 @@ ALLOW_ROOT="${BCLAUDE_ALLOW_ROOT:-}"         # 1 permits rootful podman
 DRY_RUN=""
 FORCE_REBUILD=""
 NO_CACHE=""
+
+# The uid/gid of the claude user in the image. The userns mapping aims the host
+# user at these, so they are the one place that number is written down.
+CONTAINER_UID=1000
+CONTAINER_GID=1000
+
+SELINUX_RELABEL=""                           # 1 adds the z option to bind mounts
 
 RECIPE_LABEL="org.bclaude.recipe"
 VOLUME_LABEL="org.bclaude.managed"           # marks the volumes bclaude created
@@ -63,6 +75,18 @@ fi
 info() { printf '%sbclaude:%s %s\n' "$C_DIM" "$C_OFF" "$*" >&2; }
 warn() { printf '%sbclaude: warning:%s %s\n' "$C_YEL" "$C_OFF" "$*" >&2; }
 die()  { printf '%sbclaude: error:%s %s\n' "$C_RED" "$C_OFF" "$*" >&2; exit 1; }
+
+# mount_opts [opt...] -> the ":a,b" tail of a --volume argument, adding the
+# SELinux relabel option when the host needs it. Building this by hand is how
+# ",z" ends up concatenated onto a mount that has no options yet, which podman
+# reads as part of the destination path: "/work,z" becomes the mountpoint and
+# /work stays empty, silently. Every --volume goes through here.
+mount_opts() {
+    local opts="" o
+    for o in "$@"; do opts="${opts:+$opts,}$o"; done
+    [ -n "$SELINUX_RELABEL" ] && opts="${opts:+$opts,}z"
+    printf '%s' "${opts:+:$opts}"
+}
 
 # ---------------------------------------------------------------------------
 # Embedded Containerfile
@@ -103,8 +127,9 @@ RUN echo 'claude ALL=(root) NOPASSWD: /usr/bin/apt-get, /usr/bin/apt, /usr/bin/d
 RUN find / -xdev -perm /6000 -type f ! -path /usr/bin/sudo \
         -exec chmod ug-s {} + 2>/dev/null || true
 
-# The node image ships a uid/gid 1000 user called "node". Rename it to "claude"
-# so --userns=keep-id lines the container user up with the host user (also 1000).
+# The node image ships a uid/gid 1000 user called "node". Rename it to "claude";
+# the runtime's --userns=keep-id:uid=1000,gid=1000 aims the host user at this uid,
+# whatever the host user's own uid happens to be.
 RUN groupmod -n claude node \
     && usermod -l claude -d /home/claude -m node
 
@@ -156,12 +181,40 @@ chmod 700 "$CONFIG_DIR"
 # dir around it can be per-project. Claude Code only ever looks at $CONFIG_DIR,
 # so the login is copied in on the way up and back out on the way down: the
 # token is refreshed during a session, and that refreshed token has to reach the
-# other projects. Sharing means last writer wins if two sessions overlap.
+# other projects.
 #
 # Direction of truth: the auth volume decides what you start with, the config
-# dir decides what you end with.
+# dir decides what you end with -- but only if this session actually changed it.
+# Two overlapping sessions both start from token C0; if one refreshes to C1 and
+# exits, an untouched session exiting later would otherwise put the spent C0
+# back and cost everybody a re-login. So remember what came in and stay out of
+# the way unless ours differs.
+
+# Empty for a missing file, and never non-zero: this runs under `set -e` inside
+# an assignment, where a failing substitution would take the whole session down.
+creds_fingerprint() {
+    [ -s "$1" ] || return 0
+    { sha256sum < "$1" 2>/dev/null | cut -d' ' -f1; } || true
+}
+AUTH_CREDS_IN=""
+SEEDED=""
+
 sync_auth_out() {
     { [ -d "$AUTH_DIR" ] && [ -s "$CREDS" ]; } || return 0
+    local now; now="$(creds_fingerprint "$CREDS")"
+    # An explicit --seed-creds is an instruction, so it always publishes. Beyond
+    # that, only publish a token this session actually changed.
+    if [ -z "$SEEDED" ]; then
+        # Unchanged by us: whatever is in the volume now is at least as fresh.
+        [ "$now" = "$AUTH_CREDS_IN" ] && return 0
+        # Changed under us by a session that refreshed after we started: its
+        # token is newer than ours, so it wins.
+        if [ -n "$AUTH_CREDS_IN" ] && [ -s "$AUTH_CREDS" ] \
+            && [ "$(creds_fingerprint "$AUTH_CREDS")" != "$AUTH_CREDS_IN" ]; then
+            echo "[entrypoint] another session refreshed the login; keeping theirs" >&2
+            return 0
+        fi
+    fi
     install -m 600 "$CREDS" "$AUTH_CREDS" 2>/dev/null \
         || echo "[entrypoint] warning: could not store the login in $AUTH_DIR" >&2
 }
@@ -169,6 +222,7 @@ sync_auth_out() {
 if [ -d "$AUTH_DIR" ]; then
     trap sync_auth_out EXIT
     [ -s "$AUTH_CREDS" ] && install -m 600 "$AUTH_CREDS" "$CREDS"
+    AUTH_CREDS_IN="$(creds_fingerprint "$CREDS")"
 fi
 
 # Copy the host's OAuth credentials in. The seed is mounted (read-only) only
@@ -178,6 +232,7 @@ fi
 # in on its own.
 if [ -s "$SEED" ]; then
     install -m 600 "$SEED" "$CREDS"
+    SEEDED=1
     echo "[entrypoint] seeded credentials from host" >&2
 fi
 
@@ -606,20 +661,27 @@ do_run() {
     # --ro: /work goes in read-only, so an analysis or review session cannot
     # touch the project at all. Everything Claude needs to write during a run
     # (the config volume, /tmp) is elsewhere, so this is a working setup.
-    local ws_opts="$MOUNT_SUFFIX"
+    local ws_opts=""
     if [ -n "$READONLY_WORKSPACE" ]; then
-        ws_opts=":ro$MOUNT_SUFFIX"
+        ws_opts="$(mount_opts ro)"
         info "workspace mounted read-only"
+    else
+        ws_opts="$(mount_opts)"
     fi
 
     local run_args=(
         run --rm
         --hostname bclaude
-        --userns=keep-id                 # host uid 1000 -> container uid 1000
+        # Map the host user onto the image's claude user (uid/gid 1000) rather
+        # than onto its own numeric id. Plain keep-id maps the caller to the same
+        # number inside, which for any host uid other than 1000 leaves the
+        # process (still uid 1000, from the image's USER) unable to write a
+        # workspace owned by the caller.
+        "--userns=keep-id:uid=$CONTAINER_UID,gid=$CONTAINER_GID"
         --pids-limit 2048
         --volume "$WORKSPACE:/work$ws_opts"
-        --volume "$VOLUME:/home/claude/.claude$MOUNT_SUFFIX"
-        --volume "$AUTH_VOLUME:$AUTH_DIR$MOUNT_SUFFIX"
+        --volume "$VOLUME:/home/claude/.claude$(mount_opts)"
+        --volume "$AUTH_VOLUME:$AUTH_DIR$(mount_opts)"
         --workdir /work
         --env "TERM=${TERM:-xterm-256color}"
         --env "COLORTERM=${COLORTERM:-truecolor}"
@@ -640,7 +702,8 @@ do_run() {
     # Hardening. --allow-pkg relaxes the two flags that block `sudo apt-get`:
     # no-new-privileges (blocks the setuid escalation) and cap-drop=ALL (dpkg
     # needs CHOWN/DAC_OVERRIDE etc.). Installs land in the container's throwaway
-    # layer; keep-id means Claude's /work edits still come out owned by you.
+    # layer; the userns mapping means Claude's /work edits still come out owned
+    # by you.
     if [ -n "$ALLOW_PKG" ]; then
         warn "--allow-pkg: sudo apt enabled inside the container, hardening relaxed"
     else
@@ -654,7 +717,7 @@ do_run() {
     # time it is passed, so it doubles as the fix for a token that went stale.
     if [ -n "$SEED_CREDS" ]; then
         if [ -s "$HOST_CREDS" ]; then
-            run_args+=(--volume "$HOST_CREDS:/run/host-claude/.credentials.json:ro$MOUNT_SUFFIX")
+            run_args+=(--volume "$HOST_CREDS:/run/host-claude/.credentials.json$(mount_opts ro)")
         else
             warn "--seed-creds: no host credentials at $HOST_CREDS — you'll log in inside the container"
         fi
@@ -670,19 +733,22 @@ do_run() {
         local f
         for f in settings.json statusline-command.sh; do
             [ -s "$HOME/.claude/$f" ] && \
-                run_args+=(--volume "$HOME/.claude/$f:/run/host-claude/$f:ro$MOUNT_SUFFIX")
+                run_args+=(--volume "$HOME/.claude/$f:/run/host-claude/$f$(mount_opts ro)")
         done
     fi
 
     # Your git identity, read-only. Without it every `git commit` Claude makes
     # inside the container fails with "please tell me who you are".
     if [ "$GIT_CONFIG_MOUNT" = "1" ] && [ -s "$HOME/.gitconfig" ]; then
-        run_args+=(--volume "$HOME/.gitconfig:/home/claude/.gitconfig:ro$MOUNT_SUFFIX")
+        run_args+=(--volume "$HOME/.gitconfig:/home/claude/.gitconfig$(mount_opts ro)")
     fi
 
     # Optional: forward an API key instead of / alongside the subscription creds.
+    # Named without a value, so podman imports it from our own environment: the
+    # key never reaches podman's argv, where `ps` on a shared host would show it
+    # and where --dry-run output would print it for pasting into a bug report.
     if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
-        run_args+=(--env "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY")
+        run_args+=(--env ANTHROPIC_API_KEY)
     fi
 
     run_args+=("$IMAGE" "$@")
@@ -742,8 +808,8 @@ do_doctor() {
     if have newuidmap; then ok "newuidmap/newgidmap available"
     else note "newuidmap not found (package: uidmap) — --userns=keep-id may fail"; fi
 
-    if [ "$(id -u)" != "1000" ] && [ "$rootless" = "true" ]; then
-        note "your uid is $(id -u), not 1000; keep-id still maps you onto the container's claude user"
+    if [ "$(id -u)" != "$CONTAINER_UID" ] && [ "$rootless" = "true" ]; then
+        ok "your uid is $(id -u), not $CONTAINER_UID — mapped onto the container's claude user ($CONTAINER_UID) so /work stays writable"
     fi
 
     # SELinux relabelling is needed for bind mounts on Fedora/RHEL.
@@ -1022,10 +1088,10 @@ main() {
     parse_opts "$@"
     set -- ${REST[@]+"${REST[@]}"}
 
-    # SELinux systems need the relabel suffix on bind mounts.
-    MOUNT_SUFFIX=""
+    # SELinux systems need the relabel option on bind mounts; mount_opts adds it.
+    SELINUX_RELABEL=""
     if have getenforce && [ "$(getenforce 2>/dev/null)" = "Enforcing" ]; then
-        MOUNT_SUFFIX=",z"
+        SELINUX_RELABEL=1
     fi
 
     case "${1:-}" in
