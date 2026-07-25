@@ -20,7 +20,11 @@ BCLAUDE_URL="${BCLAUDE_URL:-https://raw.githubusercontent.com/torlenor/bclaude/m
 # ---------------------------------------------------------------------------
 IMAGE="${BCLAUDE_IMAGE:-${IMAGE:-localhost/bclaude:latest}}"
 WORKSPACE="${BCLAUDE_WORKSPACE:-${WORKSPACE:-$PWD}}"
-VOLUME="${BCLAUDE_VOLUME:-${VOLUME:-bclaude-config}}"
+VOLUME_DEFAULT="bclaude-config"
+VOLUME_EXPLICIT=""                           # 1 when the volume was named by hand
+if [ -n "${BCLAUDE_VOLUME:-${VOLUME:-}}" ]; then VOLUME_EXPLICIT=1; fi
+VOLUME="${BCLAUDE_VOLUME:-${VOLUME:-$VOLUME_DEFAULT}}"
+VOLUME_PER_PROJECT="${BCLAUDE_VOLUME_PER_PROJECT:-}"
 HOST_CREDS="${HOST_CREDS:-$HOME/.claude/.credentials.json}"
 CLAUDE_VERSION="${CLAUDE_VERSION:-latest}"   # npm tag/version baked into the image
 MEMORY="${MEMORY:-4g}"                       # empty disables the memory cap
@@ -41,6 +45,8 @@ FORCE_REBUILD=""
 NO_CACHE=""
 
 RECIPE_LABEL="org.bclaude.recipe"
+VOLUME_LABEL="org.bclaude.managed"           # marks the volumes bclaude created
+WORKSPACE_LABEL="org.bclaude.workspace"      # per-project volumes: their project
 
 # ---------------------------------------------------------------------------
 # Output helpers
@@ -245,7 +251,9 @@ COMMANDS
     doctor            Check that podman and the host are set up correctly
     status            Show image, volume, credential and workspace state
     install [DIR]     Copy bclaude onto your PATH (default: ~/.local/bin)
-    clean             Remove the image (add --all to remove the config volume too)
+    clean [--all]     Remove the image; --all also offers the config volume
+    clean --list      List bclaude config volumes, their project and login state
+    clean --prune     Remove per-project volumes whose project directory is gone
     show <part>       Print an embedded file: containerfile | entrypoint
     version           Print the bclaude version
     help              This text
@@ -256,6 +264,10 @@ COMMANDS
 OPTIONS
     -w, --workspace DIR   Host directory to mount at /work        (default: $PWD)
     -V, --volume NAME     Named volume holding ~/.claude          (default: bclaude-config)
+        --volume-per-project
+                          Give each workspace its own config volume, derived from
+                          its path, so sessions, MCP servers and project settings
+                          don't bleed across repos. See `bclaude clean --list`
     -i, --image REF       Image to run                            (default: localhost/bclaude:latest)
         --claude-version V  Claude Code npm version to bake in    (default: latest)
         --ro              Mount the workspace read-only — Claude can read /work
@@ -286,9 +298,9 @@ OPTIONS
 ENVIRONMENT
     Every option has an env-var equivalent: BCLAUDE_WORKSPACE, BCLAUDE_VOLUME,
     BCLAUDE_IMAGE, CLAUDE_VERSION, MEMORY, CPUS, TMPFS_SIZE, ALLOW_PKG=1,
-    SEED_CONFIG=1, SEED_CREDS=1, BCLAUDE_RO=1, BCLAUDE_AUTOBUILD=0,
-    BCLAUDE_GIT_CONFIG=0, BCLAUDE_ALLOW_ROOT=1. HOST_CREDS points at the host
-    credentials file used by --seed-creds.
+    SEED_CONFIG=1, SEED_CREDS=1, BCLAUDE_RO=1, BCLAUDE_VOLUME_PER_PROJECT=1,
+    BCLAUDE_AUTOBUILD=0, BCLAUDE_GIT_CONFIG=0, BCLAUDE_ALLOW_ROOT=1. HOST_CREDS
+    points at the host credentials file used by --seed-creds.
     ANTHROPIC_API_KEY is forwarded into the container when set.
 
 EXAMPLES
@@ -297,6 +309,8 @@ EXAMPLES
     bclaude -p "explain this repo"     # headless prompt
     bclaude shell                      # poke around the container
     bclaude --ro -p "review this"      # read-only session, nothing can be written
+    bclaude --volume-per-project       # config volume of its own for this repo
+    bclaude clean --list               # which config volumes exist, and for what
     bclaude --allow-pkg                # let Claude apt-get install things
     bclaude doctor                     # diagnose a broken setup
 EOF_USAGE
@@ -370,13 +384,75 @@ check_subid() {
 
 image_exists() { podman image exists "$IMAGE" 2>/dev/null; }
 
-volume_mountpoint() {
-    podman volume inspect "$VOLUME" --format '{{.Mountpoint}}' 2>/dev/null || true
+volume_mountpoint() {   # volume_mountpoint [name]
+    podman volume inspect "${1:-$VOLUME}" --format '{{.Mountpoint}}' 2>/dev/null || true
 }
 
-volume_has_creds() {   # volume_has_creds [mountpoint]
-    local mp="${1:-$(volume_mountpoint)}"
+volume_has_creds() {    # volume_has_creds [name]
+    local mp; mp="$(volume_mountpoint "${1:-$VOLUME}")"
     [ -n "$mp" ] && [ -s "$mp/.credentials.json" ]
+}
+
+volume_workspace() {    # the project a per-project volume belongs to, if any
+    podman volume inspect "$1" \
+        --format "{{index .Labels \"$WORKSPACE_LABEL\"}}" 2>/dev/null || true
+}
+
+# Volumes bclaude created are labelled, so listing and pruning them never has to
+# guess from names. A volume from before the labels existed still shows up in
+# the listing, because the one this run would use is always included.
+bclaude_volumes() {
+    podman volume ls --filter "label=$VOLUME_LABEL=1" --format '{{.Name}}' 2>/dev/null || true
+}
+
+all_bclaude_volumes() {
+    {
+        bclaude_volumes
+        if podman volume exists "$VOLUME" 2>/dev/null; then printf '%s\n' "$VOLUME"; fi
+    } | sed '/^$/d' | sort -u
+}
+
+ensure_volume() {
+    podman volume exists "$VOLUME" 2>/dev/null && return 0
+    local args=(volume create --label "$VOLUME_LABEL=1")
+    if [ -n "$VOLUME_PER_PROJECT" ] && [ -z "$VOLUME_EXPLICIT" ]; then
+        args+=(--label "$WORKSPACE_LABEL=$WORKSPACE")
+    fi
+    podman "${args[@]}" "$VOLUME" >/dev/null
+    info "created config volume $VOLUME"
+}
+
+short_hash() {
+    local out
+    if   have sha256sum; then out="$(printf '%s' "$1" | sha256sum)"
+    elif have shasum;    then out="$(printf '%s' "$1" | shasum -a 256)"
+    else                      out="$(printf '%s' "$1" | cksum)"
+    fi
+    printf '%s' "${out%% *}" | cut -c1-8
+}
+
+# Per-project volume name: <default>-<directory name>-<hash of the full path>.
+# The directory name is there so `podman volume ls` stays readable; the hash is
+# what makes it unique, so two repos with the same basename don't collide.
+project_volume_name() {
+    local path="$1" slug hash
+    slug="$(basename -- "$path" | tr -c 'A-Za-z0-9._' '-' | sed -e 's/^-*//' -e 's/-*$//')"
+    slug="$(printf '%.24s' "$slug")"
+    hash="$(short_hash "$path")"
+    if [ -n "$slug" ]; then printf '%s-%s-%s\n' "$VOLUME_DEFAULT" "$slug" "$hash"
+    else                    printf '%s-%s\n'    "$VOLUME_DEFAULT" "$hash"
+    fi
+}
+
+# Decide which config volume this run uses. Call once the workspace path is
+# canonical, so the derived name is stable no matter how you spelled the path.
+resolve_volume() {
+    [ -n "$VOLUME_PER_PROJECT" ] || return 0
+    if [ -n "$VOLUME_EXPLICIT" ]; then
+        warn "--volume-per-project ignored: volume '$VOLUME' was named explicitly"
+        return 0
+    fi
+    VOLUME="$(project_volume_name "$WORKSPACE")"
 }
 
 # Credentials are not seeded from the host by default, so a fresh volume means a
@@ -474,12 +550,11 @@ do_run() {
         die "refusing to mount / as the workspace"
     fi
 
+    resolve_volume
     check_cgroups
     ensure_image
 
-    if [ -z "$DRY_RUN" ]; then
-        podman volume exists "$VOLUME" 2>/dev/null || podman volume create "$VOLUME" >/dev/null
-    fi
+    if [ -z "$DRY_RUN" ]; then ensure_volume; fi
 
     # --ro: /work goes in read-only, so an analysis or review session cannot
     # touch the project at all. Everything Claude needs to write during a run
@@ -635,6 +710,11 @@ do_doctor() {
         note "image $IMAGE not built yet — the first run builds it (or run 'bclaude build')"
     fi
 
+    if [ -d "$WORKSPACE" ]; then WORKSPACE="$(cd "$WORKSPACE" && pwd)"; fi
+    resolve_volume
+    if [ -n "$VOLUME_PER_PROJECT" ]; then
+        ok "--volume-per-project: this workspace uses config volume '$VOLUME'"
+    fi
     if podman volume exists "$VOLUME" 2>/dev/null; then ok "config volume '$VOLUME' exists"
     else note "config volume '$VOLUME' will be created on first run"; fi
 
@@ -661,6 +741,8 @@ do_doctor() {
 do_status() {
     require_podman
     printf 'bclaude %s\n' "$BCLAUDE_VERSION"
+    if [ -d "$WORKSPACE" ]; then WORKSPACE="$(cd "$WORKSPACE" && pwd)"; fi
+    resolve_volume
     local ws_note=""
     [ -n "$READONLY_WORKSPACE" ] && ws_note=" (read-only)"
     printf '  workspace : %s%s\n' "$WORKSPACE" "$ws_note"
@@ -731,8 +813,74 @@ do_install() {
     esac
 }
 
+# `clean --list`: what config volumes exist, whose project each belongs to and
+# whether it holds a login. The volume this invocation would use is starred.
+list_volumes() {
+    local vols v ws creds mark
+    vols="$(all_bclaude_volumes)"
+    if [ -z "$vols" ]; then
+        info "no bclaude config volumes yet"
+        return 0
+    fi
+    printf '  %-44s %-6s %s\n' "VOLUME" "LOGIN" "PROJECT"
+    while IFS= read -r v; do
+        [ -n "$v" ] || continue
+        ws="$(volume_workspace "$v")"
+        creds="no"; volume_has_creds "$v" && creds="yes"
+        mark=" "; [ "$v" = "$VOLUME" ] && mark="*"
+        if   [ -z "$ws" ];    then ws="(shared)"
+        elif [ ! -d "$ws" ];  then ws="$ws  ← gone"
+        fi
+        printf '%s %-44s %-6s %s\n' "$mark" "$v" "$creds" "$ws"
+    done <<< "$vols"
+    printf '\n  * = the volume this invocation would use\n'
+    printf '  bclaude clean --prune removes the ones whose project is gone\n'
+}
+
+# `clean --prune`: drop per-project volumes whose project directory no longer
+# exists. Only labelled per-project volumes qualify — a shared volume has no
+# project to disappear, so it is never touched.
+prune_volumes() {
+    local yes="" v ws gone=()
+    case "${1:-}" in -y|--yes) yes=1 ;; esac
+    while IFS= read -r v; do
+        [ -n "$v" ] || continue
+        ws="$(volume_workspace "$v")"
+        [ -n "$ws" ] || continue
+        [ -d "$ws" ] && continue
+        [ "$v" = "$VOLUME" ] && continue
+        gone+=("$v")
+    done < <(bclaude_volumes)
+
+    if [ "${#gone[@]}" -eq 0 ]; then
+        info "nothing to prune — every per-project volume still has its project directory"
+        return 0
+    fi
+    printf 'Per-project config volumes whose project directory is gone:\n' >&2
+    for v in "${gone[@]}"; do
+        printf '  %s  (%s)\n' "$v" "$(volume_workspace "$v")" >&2
+    done
+    if [ -z "$yes" ]; then
+        printf 'Remove them (sessions + credentials)? [y/N] ' >&2
+        local reply; read -r reply || reply=""
+        case "$reply" in
+            [yY]*) ;;
+            *) info "kept ${#gone[@]} volume(s)"; return 0 ;;
+        esac
+    fi
+    for v in "${gone[@]}"; do
+        podman volume rm "$v" >/dev/null && info "removed volume $v"
+    done
+}
+
 do_clean() {
     require_podman
+    if [ -d "$WORKSPACE" ]; then WORKSPACE="$(cd "$WORKSPACE" && pwd)"; fi
+    resolve_volume
+    case "${1:-}" in
+        --list)  list_volumes; return 0 ;;
+        --prune) shift; prune_volumes "$@"; return 0 ;;
+    esac
     local all=""
     [ "${1:-}" = "--all" ] && all=1
     if image_exists; then
@@ -763,12 +911,13 @@ parse_opts() {
     while [ $# -gt 0 ]; do
         case "$1" in
             -w|--workspace) WORKSPACE="${2:?--workspace needs a directory}"; shift 2 ;;
-            -V|--volume)    VOLUME="${2:?--volume needs a name}"; shift 2 ;;
+            -V|--volume)    VOLUME="${2:?--volume needs a name}"; VOLUME_EXPLICIT=1; shift 2 ;;
             -i|--image)     IMAGE="${2:?--image needs a reference}"; shift 2 ;;
             --claude-version) CLAUDE_VERSION="${2:?--claude-version needs a value}"; shift 2 ;;
             --memory)       MEMORY="${2:?--memory needs a value}"; [ "$MEMORY" = none ] && MEMORY=""; shift 2 ;;
             --cpus)         CPUS="${2:?--cpus needs a value}"; [ "$CPUS" = none ] && CPUS=""; shift 2 ;;
             --no-limits)    MEMORY=""; CPUS=""; shift ;;
+            --volume-per-project) VOLUME_PER_PROJECT=1; shift ;;
             --ro|--read-only) READONLY_WORKSPACE=1; shift ;;
             --allow-pkg)    ALLOW_PKG=1; shift ;;
             --seed-config)  SEED_CONFIG=1; shift ;;

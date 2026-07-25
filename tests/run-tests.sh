@@ -163,6 +163,97 @@ check_contains "first-login hint says it is one-time" "one-time step per volume"
 check_contains "headless without a login is called out" "no way to log in" -- hint -p hello
 check_status "first-login hint succeeds without host creds" 0 -- hint
 
+section "per-project config volumes"
+
+# The suite exports BCLAUDE_VOLUME, which counts as naming the volume by hand,
+# so these run with it unset.
+novol() { env -u BCLAUDE_VOLUME "$@"; }
+vol_name() {   # vol_name <workspace>
+    novol "$BCLAUDE" --volume-per-project --workspace "$1" --dry-run 2>/dev/null \
+        | tr ' ' '\n' | sed -n 's#^\(bclaude-config[^:]*\):/home/claude/.claude$#\1#p'
+}
+
+check_contains "--volume-per-project derives the volume from the workspace" \
+    "bclaude-config-tests-" -- novol "$BCLAUDE" --volume-per-project -w "$HERE" --dry-run
+check_contains "BCLAUDE_VOLUME_PER_PROJECT=1 does the same" "bclaude-config-tests-" -- \
+    novol env BCLAUDE_VOLUME_PER_PROJECT=1 "$BCLAUDE" -w "$HERE" --dry-run
+check_contains "an explicit volume wins" "ignored" -- \
+    novol "$BCLAUDE" --volume-per-project --volume mine --dry-run
+check_contains "an explicit volume is the one used" "mine:/home/claude/.claude" -- \
+    novol "$BCLAUDE" --volume-per-project --volume mine --dry-run
+check_contains "the shared volume stays the default" "bclaude-config:/home/claude/.claude" -- \
+    novol "$BCLAUDE" --dry-run
+check_contains "status shows the derived volume" "bclaude-config-tests-" -- \
+    novol "$BCLAUDE" --volume-per-project -w "$HERE" status
+check_contains "help documents --volume-per-project" "--volume-per-project" -- "$BCLAUDE" help
+check_contains "help documents clean --list" "clean --list" -- "$BCLAUDE" help
+
+# Same workspace -> same volume, spelled differently -> still the same volume,
+# same basename in a different place -> a different one.
+n1="$(vol_name "$HERE")"; n2="$(vol_name "$HERE/../tests")"
+[ -n "$n1" ] && [ "$n1" = "$n2" ] \
+    && ok "the derived name is stable across spellings of the path" \
+    || notok "the derived name is stable across spellings of the path" "'$n1' vs '$n2'"
+
+d1="$(mktemp -d)/proj"; d2="$(mktemp -d)/proj"; mkdir -p "$d1" "$d2"
+m1="$(vol_name "$d1")"; m2="$(vol_name "$d2")"
+[ -n "$m1" ] && [ "$m1" != "$m2" ] \
+    && ok "same basename in two places does not collide" \
+    || notok "same basename in two places does not collide" "both '$m1'"
+case "$m1" in *-proj-*) ok "the derived name carries the directory name" ;;
+    *) notok "the derived name carries the directory name" "got '$m1'" ;; esac
+rm -rf "$(dirname "$d1")" "$(dirname "$d2")"
+
+# clean --list/--prune are exercised against stub volumes: a real prune would
+# reach into the volumes of whoever is running the suite.
+with_stubs() {   # with_stubs <stdin> <function> [args...]
+    local answer="$1" fn="$2"; shift 2
+    bash -c '
+        eval "$(sed "s/^main \"\$@\"$//" '"$BCLAUDE"')" 2>/dev/null || true
+        bclaude_volumes() {
+            printf "%s\n" bclaude-config-live-aaaa bclaude-config-gone-bbbb bclaude-config-shared-cccc
+        }
+        all_bclaude_volumes() { bclaude_volumes; }
+        volume_workspace() {
+            case "$1" in
+                *live*) printf "%s" "'"$HERE"'" ;;
+                *gone*) printf "%s" /no/such/project ;;
+                *)      printf "" ;;
+            esac
+        }
+        volume_has_creds() { case "$1" in *live*) return 0 ;; *) return 1 ;; esac; }
+        podman() { printf "PODMAN %s\n" "$*"; }
+        VOLUME=bclaude-config-live-aaaa
+        fn="$1"; shift
+        "$fn" "$@"
+    ' _ "$fn" "$@" <<< "$answer"
+}
+
+check_contains "list marks the volume in use" "* bclaude-config-live-aaaa" -- \
+    with_stubs "" list_volumes
+check_contains "list reports login state" "yes" -- with_stubs "" list_volumes
+check_contains "list names the project of a per-project volume" "$HERE" -- \
+    with_stubs "" list_volumes
+check_contains "list calls out a project that is gone" "gone" -- with_stubs "" list_volumes
+check_contains "list marks an unlabelled volume as shared" "(shared)" -- \
+    with_stubs "" list_volumes
+
+check_contains "prune asks before removing anything" "Remove them" -- \
+    with_stubs n prune_volumes
+check_contains "answering no keeps the volume" "kept" -- with_stubs n prune_volumes
+check_not_contains "answering no removes nothing" "removed volume" -- \
+    with_stubs n prune_volumes
+check_contains "answering yes removes the stale volume" \
+    "removed volume bclaude-config-gone-bbbb" -- with_stubs y prune_volumes
+check_contains "--yes skips the prompt" "removed volume" -- \
+    with_stubs "" prune_volumes --yes
+check_not_contains "--yes still does not prompt" "Remove them" -- \
+    with_stubs "" prune_volumes --yes
+check_not_contains "prune leaves a live project alone" "live-aaaa" -- \
+    with_stubs y prune_volumes
+check_not_contains "prune never touches a shared volume" "shared-cccc" -- \
+    with_stubs y prune_volumes
+
 section "rootless requirement"
 
 # require_rootless is exercised by sourcing the script with main() stubbed out

@@ -38,6 +38,7 @@ bclaude --model opus                # ... any of them
 bclaude -w ~/git/proj               # mount a different directory
 bclaude shell                       # a shell in the container instead
 bclaude --ro -p "review this repo"  # read-only workspace: it cannot write anything
+bclaude --volume-per-project        # config volume of its own for this repo
 bclaude --allow-pkg                 # let Claude `sudo apt-get install` things
 bclaude doctor                      # diagnose a broken setup
 bclaude status                      # image / volume / login state
@@ -59,6 +60,8 @@ bclaude clean --all                 # remove image + config volume
 | `status` | Image, volume, credential and workspace state |
 | `install [DIR]` | Copy `bclaude` onto your PATH (default `~/.local/bin`); also works piped from curl |
 | `clean [--all]` | Remove the image; `--all` also offers to drop the config volume |
+| `clean --list` | List the config volumes, the project each belongs to and whether it holds a login |
+| `clean --prune` | Drop per-project volumes whose project directory is gone (`--yes` to skip the prompt) |
 | `show containerfile` / `show entrypoint` | Print the embedded files (to inspect or fork) |
 
 A command name wins over a same-named claude subcommand — use `bclaude run
@@ -74,6 +77,7 @@ Every option has an env-var equivalent, so both `bclaude -w ~/p` and
 | `-w, --workspace DIR` | `BCLAUDE_WORKSPACE` | `$PWD` | Host dir mounted at `/work` — the only host path Claude can reach |
 | `--ro` | `BCLAUDE_RO=1` | off | Mount the workspace read-only — Claude can read `/work`, never write it |
 | `-V, --volume NAME` | `BCLAUDE_VOLUME` | `bclaude-config` | Named volume for `~/.claude` (sessions, settings, credentials) |
+| `--volume-per-project` | `BCLAUDE_VOLUME_PER_PROJECT=1` | off | A config volume per workspace instead of one shared one (see [Config volumes](#config-volumes)) |
 | `-i, --image REF` | `BCLAUDE_IMAGE` | `localhost/bclaude:latest` | Image to run |
 | `--claude-version V` | `CLAUDE_VERSION` | `latest` | Claude Code npm version baked into the image |
 | `--memory SIZE` / `--cpus N` | `MEMORY` / `CPUS` | `4g` / `2` | Resource caps; `none` or `--no-limits` disables |
@@ -101,7 +105,8 @@ Every option has an env-var equivalent, so both `bclaude -w ~/p` and
   Claude writes in `/work` are owned by you (why the image renames `node` →
   `claude`).
 - **Config** lives in the `bclaude-config` volume at `/home/claude/.claude`,
-  separate from your host `~/.claude`.
+  separate from your host `~/.claude` — one volume shared by every project, or
+  one per project with `--volume-per-project`.
 - **Network** default rootless (pasta), unrestricted outbound — needed for
   npm/pip/git and the API.
 - **Hardening** `cap-drop=ALL`, `no-new-privileges`, seccomp, `pids-limit 2048`,
@@ -112,6 +117,28 @@ Every option has an env-var equivalent, so both `bclaude -w ~/p` and
   that can't enforce rootless cgroup limits get them dropped with a warning
   instead of a podman error; a TTY is only requested when there is one, so
   `bclaude -p ...` works in pipes and CI.
+
+## Config volumes
+
+By default every project shares one volume, `bclaude-config`, so sessions, MCP
+servers and project settings from one repo are visible in the next.
+`--volume-per-project` gives each workspace its own, named after the directory
+plus a hash of its full path (`bclaude-config-myrepo-1a2b3c4d`) — so two repos
+called `api` in different places don't collide, and the name stays the same no
+matter how you spell the path. `-V/--volume` still wins when you name one.
+
+```bash
+bclaude --volume-per-project      # this repo gets its own sessions and settings
+bclaude clean --list              # what exists, for which project, logged in?
+bclaude clean --prune             # drop volumes whose project directory is gone
+```
+
+Each volume holds its own login, so a new project means logging in again unless
+you use `ANTHROPIC_API_KEY` or `--seed-creds`. Volumes bclaude creates are
+labelled (`org.bclaude.managed`, and the project path for per-project ones),
+which is how `--list` and `--prune` know what they are looking at; `--prune`
+only ever considers volumes whose recorded project directory no longer exists,
+and never the shared one.
 
 ## Credentials
 
