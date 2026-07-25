@@ -266,6 +266,8 @@ check_contains "list marks an unlabelled volume as shared" "(shared)" -- \
 
 check_contains "prune asks before removing anything" "Remove them" -- \
     with_stubs n prune_volumes
+check_not_contains "prune does not claim to remove credentials" "credentials" -- \
+    with_stubs n prune_volumes
 check_contains "answering no keeps the volume" "kept" -- with_stubs n prune_volumes
 check_not_contains "answering no removes nothing" "removed volume" -- \
     with_stubs n prune_volumes

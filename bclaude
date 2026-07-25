@@ -918,7 +918,7 @@ prune_volumes() {
         printf '  %s  (%s)\n' "$v" "$(volume_workspace "$v")" >&2
     done
     if [ -z "$yes" ]; then
-        printf 'Remove them (sessions + credentials)? [y/N] ' >&2
+        printf 'Remove them (sessions + project settings; your login is elsewhere)? [y/N] ' >&2
         local reply; read -r reply || reply=""
         case "$reply" in
             [yY]*) ;;
