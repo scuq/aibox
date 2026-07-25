@@ -184,11 +184,23 @@ chmod 700 "$CONFIG_DIR"
 # other projects.
 #
 # Direction of truth: the auth volume decides what you start with, the config
-# dir decides what you end with -- but only if this session actually changed it.
-# Two overlapping sessions both start from token C0; if one refreshes to C1 and
-# exits, an untouched session exiting later would otherwise put the spent C0
-# back and cost everybody a re-login. So remember what came in and stay out of
-# the way unless ours differs.
+# dir decides what you end with -- but only where the two actually differ, and
+# only if nobody else moved the auth volume underneath us. AUTH_CREDS_IN is what
+# the auth volume held when we started, taken before anything is copied in, and
+# every decision on the way out is a comparison against it:
+#
+#   config ends equal to it    nothing of ours to add, leave the volume alone
+#   volume no longer equals it a session that started with us refreshed and
+#                              exited first; its token is newer, so it stands
+#   otherwise                  publish
+#
+# The first rule is what stops an untouched session putting a spent token back
+# over a live one. The catch it must not swallow: a config dir holding the only
+# copy of a login (a volume from before the auth/config split, or a fresh
+# --auth-volume alongside an existing config volume) has to reach the empty auth
+# volume. Fingerprinting the volume rather than the config dir is what keeps
+# those two apart -- "the volume gave us nothing and we have something" is a
+# difference, so it publishes.
 
 # Empty for a missing file, and never non-zero: this runs under `set -e` inside
 # an assignment, where a failing substitution would take the whole session down.
@@ -201,19 +213,16 @@ SEEDED=""
 
 sync_auth_out() {
     { [ -d "$AUTH_DIR" ] && [ -s "$CREDS" ]; } || return 0
-    local now; now="$(creds_fingerprint "$CREDS")"
-    # An explicit --seed-creds is an instruction, so it always publishes. Beyond
-    # that, only publish a token this session actually changed.
+    # An explicit --seed-creds is an instruction: it always publishes.
     if [ -z "$SEEDED" ]; then
-        # Unchanged by us: whatever is in the volume now is at least as fresh.
-        [ "$now" = "$AUTH_CREDS_IN" ] && return 0
-        # Changed under us by a session that refreshed after we started: its
-        # token is newer than ours, so it wins.
-        if [ -n "$AUTH_CREDS_IN" ] && [ -s "$AUTH_CREDS" ] \
-            && [ "$(creds_fingerprint "$AUTH_CREDS")" != "$AUTH_CREDS_IN" ]; then
+        # Moved under us by a session that refreshed after we started -- which
+        # includes it logging in while our auth volume was still empty.
+        if [ "$(creds_fingerprint "$AUTH_CREDS")" != "$AUTH_CREDS_IN" ]; then
             echo "[entrypoint] another session refreshed the login; keeping theirs" >&2
             return 0
         fi
+        # We end with exactly what the volume gave us, so there is nothing to say.
+        [ "$(creds_fingerprint "$CREDS")" = "$AUTH_CREDS_IN" ] && return 0
     fi
     install -m 600 "$CREDS" "$AUTH_CREDS" 2>/dev/null \
         || echo "[entrypoint] warning: could not store the login in $AUTH_DIR" >&2
@@ -221,8 +230,9 @@ sync_auth_out() {
 
 if [ -d "$AUTH_DIR" ]; then
     trap sync_auth_out EXIT
+    # Before the copy-in, so this is the volume's state and not the config dir's.
+    AUTH_CREDS_IN="$(creds_fingerprint "$AUTH_CREDS")"
     [ -s "$AUTH_CREDS" ] && install -m 600 "$AUTH_CREDS" "$CREDS"
-    AUTH_CREDS_IN="$(creds_fingerprint "$CREDS")"
 fi
 
 # Copy the host's OAuth credentials in. The seed is mounted (read-only) only

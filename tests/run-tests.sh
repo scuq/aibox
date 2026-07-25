@@ -270,44 +270,64 @@ section "login hand-off between overlapping sessions"
 # host, with its two directories pointed at temp dirs — no podman needed.
 epfile="$(mktemp)"; "$BCLAUDE" show entrypoint > "$epfile"
 
-# ep_result <token-in-the-auth-volume> <shell-code-run-as-the-session>
-# Echoes what the auth volume holds after the session exits. The session's code
-# writing $CLAUDE_CONFIG_DIR/.credentials.json stands for claude refreshing the
-# token; writing $BCLAUDE_AUTH_DIR/.credentials.json stands for a concurrent
-# session refreshing and exiting while this one is still up.
-ep_run() {   # ep_run <auth-token> <session-code> <cfg|log>
+# Both starting states are settable, because which of the two directories held a
+# token going in is exactly what the entrypoint has to tell apart: a config dir
+# holding the only copy has to be migrated out, while a config dir that merely
+# received a copy from the volume has nothing to contribute. Echoes what the auth
+# volume holds after the session exits. The session's code writing
+# $CLAUDE_CONFIG_DIR/.credentials.json stands for claude refreshing the token;
+# writing $BCLAUDE_AUTH_DIR/.credentials.json stands for a concurrent session
+# refreshing and exiting while this one is still up.
+ep_run() {   # ep_run <auth-token> <config-token> <session-code> <cfg|log>
     local d; d="$(mktemp -d)"; mkdir -p "$d/cfg" "$d/auth"
     [ -n "$1" ] && printf '%s' "$1" > "$d/auth/.credentials.json"
+    [ -n "$2" ] && printf '%s' "$2" > "$d/cfg/.credentials.json"
     CLAUDE_CONFIG_DIR="$d/cfg" BCLAUDE_AUTH_DIR="$d/auth" HOME="$d" \
-        bash "$epfile" bash -c "$2" >"$d/out" 2>&1
-    case "$3" in
+        bash "$epfile" bash -c "$3" >"$d/out" 2>&1
+    case "$4" in
         cfg) cat "$d/auth/.credentials.json" 2>/dev/null ;;
         log) cat "$d/out" ;;
     esac
     rm -rf "$d"
 }
-ep_result() { ep_run "$1" "$2" cfg; }
-ep_log()    { ep_run "$1" "$2" log; }
+ep_result() { ep_run "$1" "$2" "$3" cfg; }
+ep_log()    { ep_run "$1" "$2" "$3" log; }
 
 check_contains "a refreshed token reaches the auth volume" "C1" -- \
-    ep_result C0 'printf C1 > "$CLAUDE_CONFIG_DIR/.credentials.json"'
+    ep_result C0 "" 'printf C1 > "$CLAUDE_CONFIG_DIR/.credentials.json"'
 check_contains "a first login reaches the auth volume" "C1" -- \
-    ep_result "" 'printf C1 > "$CLAUDE_CONFIG_DIR/.credentials.json"'
+    ep_result "" "" 'printf C1 > "$CLAUDE_CONFIG_DIR/.credentials.json"'
 check_contains "an unchanged session leaves the token alone" "C0" -- \
-    ep_result C0 'true'
+    ep_result C0 "" 'true'
 # The bug: this session never touched the token, so it must not undo the refresh
 # another session made while it was running.
 check_contains "an unchanged session does not restore a spent token over a newer one" "C1" -- \
-    ep_result C0 'printf C1 > "$BCLAUDE_AUTH_DIR/.credentials.json"'
+    ep_result C0 "" 'printf C1 > "$BCLAUDE_AUTH_DIR/.credentials.json"'
 check_not_contains "the spent token is really gone" "C0" -- \
-    ep_result C0 'printf C1 > "$BCLAUDE_AUTH_DIR/.credentials.json"'
+    ep_result C0 "" 'printf C1 > "$BCLAUDE_AUTH_DIR/.credentials.json"'
 # Both refreshed: the one that landed in the volume after we started is newer.
 check_contains "a concurrent refresh wins over ours" "C2" -- \
-    ep_result C0 'printf C1 > "$CLAUDE_CONFIG_DIR/.credentials.json"
-                  printf C2 > "$BCLAUDE_AUTH_DIR/.credentials.json"'
+    ep_result C0 "" 'printf C1 > "$CLAUDE_CONFIG_DIR/.credentials.json"
+                     printf C2 > "$BCLAUDE_AUTH_DIR/.credentials.json"'
 check_contains "yielding to a concurrent refresh is reported" "keeping theirs" -- \
-    ep_log C0 'printf C1 > "$CLAUDE_CONFIG_DIR/.credentials.json"
-               printf C2 > "$BCLAUDE_AUTH_DIR/.credentials.json"'
+    ep_log C0 "" 'printf C1 > "$CLAUDE_CONFIG_DIR/.credentials.json"
+                  printf C2 > "$BCLAUDE_AUTH_DIR/.credentials.json"'
+
+# A config volume holding the only copy of a login — one from before the auth
+# volume existed, or an existing config volume paired with a fresh
+# --auth-volume — has to reach the empty auth volume. `logged_in` promises this:
+# it counts a config-only token as being logged in because the next run migrates
+# it. Skipping the write because the session "changed nothing" would strand it.
+check_contains "a config-only login migrates into an empty auth volume" "C0" -- \
+    ep_result "" C0 'true'
+check_contains "a config-only login migrates even after a refresh" "C1" -- \
+    ep_result "" C0 'printf C1 > "$CLAUDE_CONFIG_DIR/.credentials.json"'
+# But it must not overwrite a login another session established in the meantime.
+check_contains "migration yields to a login another session just made" "C9" -- \
+    ep_result "" C0 'printf C9 > "$BCLAUDE_AUTH_DIR/.credentials.json"'
+# Nothing anywhere stays nothing.
+check_not_contains "an empty auth volume stays empty with no login at all" "C" -- \
+    ep_result "" "" 'true'
 rm -f "$epfile"
 
 section "credential seeding"
