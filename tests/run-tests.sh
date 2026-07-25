@@ -15,6 +15,7 @@ FAST=""
 # Isolate from the user's real image/volume/credentials.
 export BCLAUDE_IMAGE="${BCLAUDE_IMAGE:-localhost/bclaude-test:latest}"
 export BCLAUDE_VOLUME="${BCLAUDE_VOLUME:-bclaude-test-config}"
+export BCLAUDE_AUTH_VOLUME="${BCLAUDE_AUTH_VOLUME:-bclaude-test-auth}"
 export HOST_CREDS="${HOST_CREDS:-/nonexistent/.credentials.json}"
 
 pass=0; fail=0
@@ -123,6 +124,29 @@ check_not_contains "--no-git-config drops the gitconfig mount" ".gitconfig" -- \
 check_contains "run forces claude subcommands through" "latest install" -- \
     "$BCLAUDE" --dry-run run install
 
+section "shared auth volume"
+
+check_contains "the auth volume is mounted" "bclaude-test-auth:/home/claude/.claude-auth" -- \
+    "$BCLAUDE" --dry-run
+check_contains "--auth-volume is honoured" "myauth:/home/claude/.claude-auth" -- \
+    "$BCLAUDE" --auth-volume myauth --dry-run
+check_contains "the auth volume is separate from the config volume" \
+    "bclaude-test-config:/home/claude/.claude " -- "$BCLAUDE" --dry-run
+check_contains "per-project volumes keep the shared auth volume" \
+    "bclaude-test-auth:/home/claude/.claude-auth" -- \
+    env -u BCLAUDE_VOLUME "$BCLAUDE" --volume-per-project --dry-run
+check_contains "status reports the auth volume" "auth      : bclaude-test-auth" -- \
+    "$BCLAUDE" status
+check_contains "help documents --auth-volume" "--auth-volume" -- "$BCLAUDE" help
+
+# The entrypoint carries the login between the two volumes.
+check_contains "the entrypoint copies the login in from the auth volume" \
+    'install -m 600 "$AUTH_CREDS" "$CREDS"' -- "$BCLAUDE" show entrypoint
+check_contains "the entrypoint writes the login back out on exit" \
+    "trap sync_auth_out EXIT" -- "$BCLAUDE" show entrypoint
+check_not_contains "the entrypoint no longer execs, so the trap can run" \
+    'exec -- "$@"' -- "$BCLAUDE" show entrypoint
+
 section "credential seeding"
 
 # Seeding is opt-in: the host token must not be mounted unless asked for, and
@@ -147,13 +171,15 @@ hint() {   # hint [claude args...]
     bash -c '
         eval "$(sed "s/^main \"\$@\"$//" '"$BCLAUDE"')" 2>/dev/null || true
         VOLUME=testvol
+        AUTH_VOLUME=testauth
         HOST_CREDS=/nonexistent/.credentials.json
         first_login_hint "$@"
     ' _ "$@"
 }
 check_contains "first-login hint explains the container login" \
     "log in inside the container" -- hint
-check_contains "first-login hint says it is one-time" "one-time step per volume" -- hint
+check_contains "first-login hint says it is one-time" "one-time step for all your projects" -- hint
+check_contains "first-login hint points at the auth volume" "volume 'testauth'" -- hint
 check_contains "headless without a login is called out" "no way to log in" -- hint -p hello
 check_status "first-login hint succeeds without host creds" 0 -- hint
 
@@ -215,9 +241,10 @@ with_stubs() {   # with_stubs <stdin> <function> [args...]
                 *)      printf "" ;;
             esac
         }
-        volume_has_creds() { case "$1" in *live*) return 0 ;; *) return 1 ;; esac; }
-        podman() { printf "PODMAN %s\n" "$*"; }
+        volume_has_creds() { case "$1" in *auth*) return 0 ;; *) return 1 ;; esac; }
+        podman() { printf "PODMAN %s\n" "$*" >&2; }
         VOLUME=bclaude-config-live-aaaa
+        AUTH_VOLUME=bclaude-stub-auth
         fn="$1"; shift
         "$fn" "$@"
     ' _ "$fn" "$@" <<< "$answer"
@@ -225,7 +252,10 @@ with_stubs() {   # with_stubs <stdin> <function> [args...]
 
 check_contains "list marks the volume in use" "* bclaude-config-live-aaaa" -- \
     with_stubs "" list_volumes
-check_contains "list reports login state" "yes" -- with_stubs "" list_volumes
+check_contains "list shows the auth volume and its login state" \
+    "bclaude-stub-auth (logged in)" -- with_stubs "" list_volumes
+check_not_contains "list does not put the auth volume among the config volumes" \
+    "* bclaude-stub-auth" -- with_stubs "" list_volumes
 check_contains "list names the project of a per-project volume" "$HERE" -- \
     with_stubs "" list_volumes
 check_contains "list calls out a project that is gone" "gone" -- with_stubs "" list_volumes
@@ -336,6 +366,10 @@ else
             "$BCLAUDE" shell -c 'echo $CLAUDE_CONFIG_DIR'
         check_status "run exits cleanly through the wrapper" 0 -- \
             "$BCLAUDE" shell -c 'true'
+        # The entrypoint runs claude as a child now instead of exec'ing it, so
+        # the exit code has to be passed back by hand.
+        check_status "a non-zero exit code survives the wrapper" 3 -- \
+            "$BCLAUDE" shell -c 'exit 3'
         # Seeding end to end: the entrypoint copies the mounted seed into the
         # volume with mode 600, and it stays there on later runs without it.
         seeddir="$(mktemp -d)"; printf '{"seed":1}' > "$seeddir/.credentials.json"
@@ -354,6 +388,20 @@ else
             'cat "$HOME/.claude/.credentials.json"'
         rm -rf "$seeddir"
 
+        # The login is in the auth volume, so a different config volume — what
+        # --volume-per-project gives you — is logged in without seeding again.
+        check_contains "a second config volume is already logged in" '{"seed":2}' -- \
+            env BCLAUDE_VOLUME=bclaude-test-config2 "$BCLAUDE" shell -c \
+            'cat "$HOME/.claude/.credentials.json"'
+        # ... and a token refreshed during that session reaches the first one.
+        env BCLAUDE_VOLUME=bclaude-test-config2 "$BCLAUDE" shell -c \
+            'printf %s "{\"seed\":3}" > "$HOME/.claude/.credentials.json"' >/dev/null 2>&1
+        check_contains "a refreshed token reaches the other config volume" '{"seed":3}' -- \
+            "$BCLAUDE" shell -c 'cat "$HOME/.claude/.credentials.json"'
+        check_contains "the auth volume holds the login, not the config volume" '{"seed":3}' -- \
+            bash -c "cat \"\$(podman volume inspect '$BCLAUDE_AUTH_VOLUME' --format '{{.Mountpoint}}')/.credentials.json\""
+        podman volume rm -f bclaude-test-config2 >/dev/null 2>&1 || true
+
         check_contains "image carries the recipe label" "org.bclaude.recipe" -- \
             podman image inspect "$BCLAUDE_IMAGE" --format '{{json .Labels}}'
         check_contains "status reports the image as up to date" "up-to-date" -- \
@@ -363,9 +411,10 @@ else
     fi
 
     if [ -n "${BCLAUDE_KEEP:-}" ]; then
-        printf '  .... keeping %s and %s (BCLAUDE_KEEP set)\n' "$BCLAUDE_IMAGE" "$BCLAUDE_VOLUME"
+        printf '  .... keeping %s, %s and %s (BCLAUDE_KEEP set)\n' "$BCLAUDE_IMAGE" "$BCLAUDE_VOLUME" "$BCLAUDE_AUTH_VOLUME"
     else
         podman volume rm -f "$BCLAUDE_VOLUME" >/dev/null 2>&1 || true
+        podman volume rm -f "$BCLAUDE_AUTH_VOLUME" >/dev/null 2>&1 || true
         podman rmi -f "$BCLAUDE_IMAGE" >/dev/null 2>&1 || true
     fi
 fi

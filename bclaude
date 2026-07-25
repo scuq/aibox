@@ -25,6 +25,10 @@ VOLUME_EXPLICIT=""                           # 1 when the volume was named by ha
 if [ -n "${BCLAUDE_VOLUME:-${VOLUME:-}}" ]; then VOLUME_EXPLICIT=1; fi
 VOLUME="${BCLAUDE_VOLUME:-${VOLUME:-$VOLUME_DEFAULT}}"
 VOLUME_PER_PROJECT="${BCLAUDE_VOLUME_PER_PROJECT:-}"
+# The login lives apart from the rest of the config, in one volume shared by
+# every project, so per-project config volumes don't mean logging in per project.
+AUTH_VOLUME="${BCLAUDE_AUTH_VOLUME:-${AUTH_VOLUME:-bclaude-auth}}"
+AUTH_DIR="/home/claude/.claude-auth"
 HOST_CREDS="${HOST_CREDS:-$HOME/.claude/.credentials.json}"
 CLAUDE_VERSION="${CLAUDE_VERSION:-latest}"   # npm tag/version baked into the image
 MEMORY="${MEMORY:-4g}"                       # empty disables the memory cap
@@ -43,6 +47,7 @@ NO_CACHE=""
 
 RECIPE_LABEL="org.bclaude.recipe"
 VOLUME_LABEL="org.bclaude.managed"           # marks the volumes bclaude created
+ROLE_LABEL="org.bclaude.role"                # config | auth
 WORKSPACE_LABEL="org.bclaude.workspace"      # per-project volumes: their project
 
 # ---------------------------------------------------------------------------
@@ -106,11 +111,12 @@ RUN groupmod -n claude node \
 RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_VERSION} \
     && npm cache clean --force
 
-# .claude is the mountpoint for the persistent config volume; creating it here
-# owned by claude means podman's volume copy-up gets the ownership right.
-RUN mkdir -p /work /home/claude/.claude /home/claude/.npm-global \
+# .claude is the mountpoint for the config volume and .claude-auth for the
+# shared login volume; creating them here owned by claude means podman's volume
+# copy-up gets the ownership right.
+RUN mkdir -p /work /home/claude/.claude /home/claude/.claude-auth /home/claude/.npm-global \
     && chown -R claude:claude /work /home/claude \
-    && chmod 700 /home/claude/.claude
+    && chmod 700 /home/claude/.claude /home/claude/.claude-auth
 
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod 0755 /usr/local/bin/entrypoint.sh
@@ -138,22 +144,44 @@ entrypoint_text() {
 set -euo pipefail
 
 CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+AUTH_DIR="${BCLAUDE_AUTH_DIR:-$HOME/.claude-auth}"
 SEED="/run/host-claude/.credentials.json"
+CREDS="$CONFIG_DIR/.credentials.json"
+AUTH_CREDS="$AUTH_DIR/.credentials.json"
 
 mkdir -p "$CONFIG_DIR"
 chmod 700 "$CONFIG_DIR"
 
-# Copy the host's OAuth credentials into the container's own config volume. The
-# seed is mounted (read-only) only when the caller asked for it with
-# --seed-creds, so its presence is the instruction: copy it in, replacing
-# whatever is there — that is how a stale seeded token gets refreshed. Without
-# the flag there is no seed and the container logs in on its own.
+# The login lives in its own volume, shared by every project, while the config
+# dir around it can be per-project. Claude Code only ever looks at $CONFIG_DIR,
+# so the login is copied in on the way up and back out on the way down: the
+# token is refreshed during a session, and that refreshed token has to reach the
+# other projects. Sharing means last writer wins if two sessions overlap.
+#
+# Direction of truth: the auth volume decides what you start with, the config
+# dir decides what you end with.
+sync_auth_out() {
+    { [ -d "$AUTH_DIR" ] && [ -s "$CREDS" ]; } || return 0
+    install -m 600 "$CREDS" "$AUTH_CREDS" 2>/dev/null \
+        || echo "[entrypoint] warning: could not store the login in $AUTH_DIR" >&2
+}
+
+if [ -d "$AUTH_DIR" ]; then
+    trap sync_auth_out EXIT
+    [ -s "$AUTH_CREDS" ] && install -m 600 "$AUTH_CREDS" "$CREDS"
+fi
+
+# Copy the host's OAuth credentials in. The seed is mounted (read-only) only
+# when the caller asked for it with --seed-creds, so its presence is the
+# instruction: copy it in, replacing whatever is there — that is how a stale
+# token gets refreshed. Without the flag there is no seed and the container logs
+# in on its own.
 if [ -s "$SEED" ]; then
-    install -m 600 "$SEED" "$CONFIG_DIR/.credentials.json"
+    install -m 600 "$SEED" "$CREDS"
     echo "[entrypoint] seeded credentials from host" >&2
 fi
 
-if [ ! -s "$CONFIG_DIR/.credentials.json" ] && [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+if [ ! -s "$CREDS" ] && [ -z "${ANTHROPIC_API_KEY:-}" ]; then
     echo "[entrypoint] warning: no credentials found; run 'claude' and log in." >&2
 fi
 
@@ -162,7 +190,7 @@ fi
 # runs skip onboarding, so this only bites interactive sessions. Seed the flag
 # (and a theme, to skip the theme picker) into the config's .claude.json.
 CONFIG_JSON="$CONFIG_DIR/.claude.json"
-if [ -s "$CONFIG_DIR/.credentials.json" ] || [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+if [ -s "$CREDS" ] || [ -n "${ANTHROPIC_API_KEY:-}" ]; then
     [ -s "$CONFIG_JSON" ] || echo '{}' > "$CONFIG_JSON"
     tmp="$(mktemp "$CONFIG_DIR/.claude.json.XXXXXX")"
     if jq '.hasCompletedOnboarding = true
@@ -213,7 +241,12 @@ case "${1:-}" in
         ;;
 esac
 
-exec -- "$@"
+# Not exec: the login has to be written back to the shared auth volume when the
+# session ends (the EXIT trap above), so this stays as pid 1 and claude runs as
+# its child, in the foreground, with the terminal.
+rc=0
+"$@" || rc=$?
+exit "$rc"
 ENTRYPOINT
 }
 
@@ -246,7 +279,7 @@ COMMANDS
     build             Build/rebuild the container image
     update            Rebuild the image with the newest Claude Code
     doctor            Check that podman and the host are set up correctly
-    status            Show image, volume, credential and workspace state
+    status            Show image, volumes, credential and workspace state
     install [DIR]     Copy bclaude onto your PATH (default: ~/.local/bin)
     clean [--all]     Remove the image; --all also offers the config volume
     clean --list      List bclaude config volumes, their project and login state
@@ -264,7 +297,11 @@ OPTIONS
         --volume-per-project
                           Give each workspace its own config volume, derived from
                           its path, so sessions, MCP servers and project settings
-                          don't bleed across repos. See `bclaude clean --list`
+                          don't bleed across repos. The login is not in there —
+                          it stays shared. See `bclaude clean --list`
+        --auth-volume NAME
+                          Volume holding the login, shared by every project
+                                                                (default: bclaude-auth)
     -i, --image REF       Image to run                            (default: localhost/bclaude:latest)
         --claude-version V  Claude Code npm version to bake in    (default: latest)
         --ro              Mount the workspace read-only — Claude can read /work
@@ -294,7 +331,7 @@ OPTIONS
 
 ENVIRONMENT
     Every option has an env-var equivalent: BCLAUDE_WORKSPACE, BCLAUDE_VOLUME,
-    BCLAUDE_IMAGE, CLAUDE_VERSION, MEMORY, CPUS, TMPFS_SIZE, ALLOW_PKG=1,
+    BCLAUDE_AUTH_VOLUME, BCLAUDE_IMAGE, CLAUDE_VERSION, MEMORY, CPUS, TMPFS_SIZE, ALLOW_PKG=1,
     SEED_CONFIG=1, SEED_CREDS=1, BCLAUDE_RO=1, BCLAUDE_VOLUME_PER_PROJECT=1,
     BCLAUDE_AUTOBUILD=0, BCLAUDE_GIT_CONFIG=0, BCLAUDE_ALLOW_ROOT=1. HOST_CREDS
     points at the host credentials file used by --seed-creds.
@@ -395,11 +432,16 @@ volume_workspace() {    # the project a per-project volume belongs to, if any
         --format "{{index .Labels \"$WORKSPACE_LABEL\"}}" 2>/dev/null || true
 }
 
+# You are logged in if the shared auth volume holds a token. A config volume
+# from before the split may still hold the only copy; the entrypoint moves it
+# into the auth volume on the next run, so count it too.
+logged_in() { volume_has_creds "$AUTH_VOLUME" || volume_has_creds "$VOLUME"; }
+
 # Volumes bclaude created are labelled, so listing and pruning them never has to
 # guess from names. A volume from before the labels existed still shows up in
 # the listing, because the one this run would use is always included.
-bclaude_volumes() {
-    podman volume ls --filter "label=$VOLUME_LABEL=1" --format '{{.Name}}' 2>/dev/null || true
+bclaude_volumes() {   # config volumes only; the auth volume is not one of them
+    podman volume ls --filter "label=$ROLE_LABEL=config" --format '{{.Name}}' 2>/dev/null || true
 }
 
 all_bclaude_volumes() {
@@ -409,14 +451,21 @@ all_bclaude_volumes() {
     } | sed '/^$/d' | sort -u
 }
 
-ensure_volume() {
-    podman volume exists "$VOLUME" 2>/dev/null && return 0
-    local args=(volume create --label "$VOLUME_LABEL=1")
+ensure_volume() {   # ensure_volume <name> <role> [workspace]
+    podman volume exists "$1" 2>/dev/null && return 0
+    local args=(volume create --label "$VOLUME_LABEL=1" --label "$ROLE_LABEL=$2")
+    if [ -n "${3:-}" ]; then args+=(--label "$WORKSPACE_LABEL=$3"); fi
+    podman "${args[@]}" "$1" >/dev/null
+    info "created $2 volume $1"
+}
+
+ensure_volumes() {
+    ensure_volume "$AUTH_VOLUME" auth
     if [ -n "$VOLUME_PER_PROJECT" ] && [ -z "$VOLUME_EXPLICIT" ]; then
-        args+=(--label "$WORKSPACE_LABEL=$WORKSPACE")
+        ensure_volume "$VOLUME" config "$WORKSPACE"
+    else
+        ensure_volume "$VOLUME" config
     fi
-    podman "${args[@]}" "$VOLUME" >/dev/null
-    info "created config volume $VOLUME"
 }
 
 short_hash() {
@@ -461,11 +510,11 @@ first_login_hint() {
         case "$a" in -p|--print) headless=1; break ;; esac
     done
     if [ -n "$headless" ]; then
-        warn "no login in volume '$VOLUME' and no ANTHROPIC_API_KEY — a headless run has no way to log in.
+        warn "no login in volume '$AUTH_VOLUME' and no ANTHROPIC_API_KEY — a headless run has no way to log in.
   Run 'bclaude' once interactively to log in, or pass --seed-creds to copy your host login into the volume."
     else
-        info "no login in volume '$VOLUME' yet — Claude will ask you to log in inside the container"
-        info "that is a one-time step per volume; the login is stored there, not on your host"
+        info "no login in volume '$AUTH_VOLUME' yet — Claude will ask you to log in inside the container"
+        info "that is a one-time step for all your projects; the login is stored there, not on your host"
         if [ -s "$HOST_CREDS" ]; then
             info "to reuse your host login instead, re-run with --seed-creds"
         fi
@@ -551,7 +600,7 @@ do_run() {
     check_cgroups
     ensure_image
 
-    if [ -z "$DRY_RUN" ]; then ensure_volume; fi
+    if [ -z "$DRY_RUN" ]; then ensure_volumes; fi
 
     # --ro: /work goes in read-only, so an analysis or review session cannot
     # touch the project at all. Everything Claude needs to write during a run
@@ -569,6 +618,7 @@ do_run() {
         --pids-limit 2048
         --volume "$WORKSPACE:/work$ws_opts"
         --volume "$VOLUME:/home/claude/.claude$MOUNT_SUFFIX"
+        --volume "$AUTH_VOLUME:$AUTH_DIR$MOUNT_SUFFIX"
         --workdir /work
         --env "TERM=${TERM:-xterm-256color}"
         --env "COLORTERM=${COLORTERM:-truecolor}"
@@ -607,7 +657,7 @@ do_run() {
         else
             warn "--seed-creds: no host credentials at $HOST_CREDS — you'll log in inside the container"
         fi
-    elif [ -z "${ANTHROPIC_API_KEY:-}" ] && [ -z "$DRY_RUN" ] && ! volume_has_creds; then
+    elif [ -z "${ANTHROPIC_API_KEY:-}" ] && [ -z "$DRY_RUN" ] && ! logged_in; then
         first_login_hint "$@"
     fi
 
@@ -716,8 +766,8 @@ do_doctor() {
     else note "config volume '$VOLUME' will be created on first run"; fi
 
     if [ -n "$SEED_CREDS" ] && [ -s "$HOST_CREDS" ]; then
-        ok "--seed-creds: $HOST_CREDS will be copied into volume '$VOLUME' on the next run"
-    elif volume_has_creds; then ok "volume '$VOLUME' has its own login"
+        ok "--seed-creds: $HOST_CREDS will be copied into volume '$AUTH_VOLUME' on the next run"
+    elif logged_in; then ok "logged in — the token is in the shared auth volume '$AUTH_VOLUME'"
     elif [ -n "${ANTHROPIC_API_KEY:-}" ]; then ok "ANTHROPIC_API_KEY is set and will be forwarded"
     elif [ -s "$HOST_CREDS" ]; then
         note "no login yet — the first run logs in inside the container (host credentials exist at $HOST_CREDS but are only used if you pass --seed-creds)"
@@ -753,8 +803,10 @@ do_status() {
     fi
     printf '  volume    : %s%s\n' "$VOLUME" \
         "$(podman volume exists "$VOLUME" 2>/dev/null && echo '' || echo ' (not created)')"
+    printf '  auth      : %s%s\n' "$AUTH_VOLUME" \
+        "$(podman volume exists "$AUTH_VOLUME" 2>/dev/null && echo '' || echo ' (not created)')"
     local creds="no (logs in inside the container on first run)"
-    volume_has_creds && creds="yes"
+    logged_in && creds="yes"
     [ -n "$SEED_CREDS" ] && [ -s "$HOST_CREDS" ] && \
         creds="$creds; --seed-creds copies $HOST_CREDS in"
     printf '  logged in : %s\n' "$creds"
@@ -813,22 +865,28 @@ do_install() {
 # `clean --list`: what config volumes exist, whose project each belongs to and
 # whether it holds a login. The volume this invocation would use is starred.
 list_volumes() {
-    local vols v ws creds mark
+    local vols v ws mark state="no login yet"
+    volume_has_creds "$AUTH_VOLUME" && state="logged in"
+    if podman volume exists "$AUTH_VOLUME" 2>/dev/null; then
+        printf '  auth volume  %s (%s)\n\n' "$AUTH_VOLUME" "$state"
+    else
+        printf '  auth volume  %s (not created yet)\n\n' "$AUTH_VOLUME"
+    fi
+
     vols="$(all_bclaude_volumes)"
     if [ -z "$vols" ]; then
         info "no bclaude config volumes yet"
         return 0
     fi
-    printf '  %-44s %-6s %s\n' "VOLUME" "LOGIN" "PROJECT"
+    printf '  %-44s %s\n' "CONFIG VOLUME" "PROJECT"
     while IFS= read -r v; do
         [ -n "$v" ] || continue
         ws="$(volume_workspace "$v")"
-        creds="no"; volume_has_creds "$v" && creds="yes"
         mark=" "; [ "$v" = "$VOLUME" ] && mark="*"
         if   [ -z "$ws" ];    then ws="(shared)"
         elif [ ! -d "$ws" ];  then ws="$ws  ← gone"
         fi
-        printf '%s %-44s %-6s %s\n' "$mark" "$v" "$creds" "$ws"
+        printf '%s %-44s %s\n' "$mark" "$v" "$ws"
     done <<< "$vols"
     printf '\n  * = the volume this invocation would use\n'
     printf '  bclaude clean --prune removes the ones whose project is gone\n'
@@ -846,6 +904,7 @@ prune_volumes() {
         [ -n "$ws" ] || continue
         [ -d "$ws" ] && continue
         [ "$v" = "$VOLUME" ] && continue
+        [ "$v" = "$AUTH_VOLUME" ] && continue
         gone+=("$v")
     done < <(bclaude_volumes)
 
@@ -886,16 +945,27 @@ do_clean() {
         info "image $IMAGE not present"
     fi
     if [ -n "$all" ]; then
+        local reply
         if podman volume exists "$VOLUME" 2>/dev/null; then
-            printf 'Remove config volume %s (sessions + credentials)? [y/N] ' "$VOLUME" >&2
-            local reply; read -r reply || reply=""
+            printf 'Remove config volume %s (sessions + project settings)? [y/N] ' "$VOLUME" >&2
+            read -r reply || reply=""
             case "$reply" in
                 [yY]*) podman volume rm "$VOLUME" >/dev/null && info "removed volume $VOLUME" ;;
                 *) info "kept volume $VOLUME" ;;
             esac
         fi
+        # The login is a volume of its own now, so --all has to ask separately
+        # or it would quietly stop meaning "remove everything".
+        if podman volume exists "$AUTH_VOLUME" 2>/dev/null; then
+            printf 'Remove auth volume %s (logs you out of every project)? [y/N] ' "$AUTH_VOLUME" >&2
+            read -r reply || reply=""
+            case "$reply" in
+                [yY]*) podman volume rm "$AUTH_VOLUME" >/dev/null && info "removed volume $AUTH_VOLUME" ;;
+                *) info "kept volume $AUTH_VOLUME" ;;
+            esac
+        fi
     else
-        info "config volume $VOLUME kept (use 'bclaude clean --all' to remove it)"
+        info "config volume $VOLUME and auth volume $AUTH_VOLUME kept (use 'bclaude clean --all' to remove them)"
     fi
 }
 
@@ -915,6 +985,7 @@ parse_opts() {
             --cpus)         CPUS="${2:?--cpus needs a value}"; [ "$CPUS" = none ] && CPUS=""; shift 2 ;;
             --no-limits)    MEMORY=""; CPUS=""; shift ;;
             --volume-per-project) VOLUME_PER_PROJECT=1; shift ;;
+            --auth-volume)  AUTH_VOLUME="${2:?--auth-volume needs a name}"; shift 2 ;;
             --ro|--read-only) READONLY_WORKSPACE=1; shift ;;
             --allow-pkg)    ALLOW_PKG=1; shift ;;
             --seed-config)  SEED_CONFIG=1; shift ;;
