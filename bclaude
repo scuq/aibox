@@ -1,0 +1,758 @@
+#!/usr/bin/env bash
+# bclaude — run Claude Code inside a rootless podman container.
+#
+# Single file: the Containerfile and the container entrypoint are embedded
+# below, so downloading this script is all you need.
+#
+#   bclaude                      interactive session on $PWD
+#   bclaude -p "summarize this"  claude flags pass straight through
+#   bclaude shell                a shell in the container instead
+#   bclaude doctor               check that the host is set up correctly
+#
+# See `bclaude help` for the full interface.
+set -euo pipefail
+
+BCLAUDE_VERSION="1.0.0"
+BCLAUDE_URL="${BCLAUDE_URL:-https://raw.githubusercontent.com/torlenor/bclaude/main/bclaude}"
+
+# ---------------------------------------------------------------------------
+# Defaults (every one of these can be overridden by env var or by a flag)
+# ---------------------------------------------------------------------------
+IMAGE="${BCLAUDE_IMAGE:-${IMAGE:-localhost/bclaude:latest}}"
+WORKSPACE="${BCLAUDE_WORKSPACE:-${WORKSPACE:-$PWD}}"
+VOLUME="${BCLAUDE_VOLUME:-${VOLUME:-bclaude-config}}"
+HOST_CREDS="${HOST_CREDS:-$HOME/.claude/.credentials.json}"
+CLAUDE_VERSION="${CLAUDE_VERSION:-latest}"   # npm tag/version baked into the image
+MEMORY="${MEMORY:-4g}"                       # empty disables the memory cap
+CPUS="${CPUS:-2}"                            # empty disables the cpu cap
+TMPFS_SIZE="${TMPFS_SIZE:-512m}"
+ALLOW_PKG="${ALLOW_PKG:-}"
+SEED_CONFIG="${SEED_CONFIG:-}"
+FORCE_SEED="${FORCE_SEED:-}"
+AUTOBUILD="${BCLAUDE_AUTOBUILD:-1}"          # 0 disables build-on-demand
+GIT_CONFIG_MOUNT="${BCLAUDE_GIT_CONFIG:-1}"  # 0 disables mounting ~/.gitconfig
+ALLOW_ROOT="${BCLAUDE_ALLOW_ROOT:-}"         # 1 permits rootful podman
+DRY_RUN=""
+FORCE_REBUILD=""
+NO_CACHE=""
+
+RECIPE_LABEL="org.bclaude.recipe"
+
+# ---------------------------------------------------------------------------
+# Output helpers
+# ---------------------------------------------------------------------------
+if [ -t 2 ]; then
+    C_RED=$'\033[31m'; C_YEL=$'\033[33m'; C_GRN=$'\033[32m'
+    C_DIM=$'\033[2m';  C_OFF=$'\033[0m'
+else
+    C_RED=""; C_YEL=""; C_GRN=""; C_DIM=""; C_OFF=""
+fi
+
+info() { printf '%sbclaude:%s %s\n' "$C_DIM" "$C_OFF" "$*" >&2; }
+warn() { printf '%sbclaude: warning:%s %s\n' "$C_YEL" "$C_OFF" "$*" >&2; }
+die()  { printf '%sbclaude: error:%s %s\n' "$C_RED" "$C_OFF" "$*" >&2; exit 1; }
+
+# ---------------------------------------------------------------------------
+# Embedded Containerfile
+# ---------------------------------------------------------------------------
+containerfile_text() {
+    cat <<'CONTAINERFILE'
+FROM docker.io/library/node:22-bookworm-slim
+
+# Pin this to a specific version (e.g. 2.1.218) for a reproducible image.
+ARG CLAUDE_VERSION=latest
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        git \
+        jq \
+        less \
+        openssh-client \
+        procps \
+        ripgrep \
+        python3 \
+        python3-venv \
+        sudo \
+    && rm -rf /var/lib/apt/lists/*
+
+# Passwordless apt for the claude user. This is inert by default: the runtime
+# runs with no-new-privileges + cap-drop=ALL, which blocks sudo entirely. It
+# only takes effect when bclaude is run with --allow-pkg, which relaxes those
+# two flags. Scoped to package tooling rather than a blanket ALL.
+RUN echo 'claude ALL=(root) NOPASSWD: /usr/bin/apt-get, /usr/bin/apt, /usr/bin/dpkg' \
+        > /etc/sudoers.d/claude-apt \
+    && chmod 0440 /etc/sudoers.d/claude-apt
+
+# Strip setuid/setgid from everything except sudo (needed for --allow-pkg).
+# These bits are inert under NoNewPrivs + cap-drop=ALL, but become latent
+# privilege paths the moment that posture is relaxed. su, mount, passwd, chsh,
+# etc. are never needed here.
+RUN find / -xdev -perm /6000 -type f ! -path /usr/bin/sudo \
+        -exec chmod ug-s {} + 2>/dev/null || true
+
+# The node image ships a uid/gid 1000 user called "node". Rename it to "claude"
+# so --userns=keep-id lines the container user up with the host user (also 1000).
+RUN groupmod -n claude node \
+    && usermod -l claude -d /home/claude -m node
+
+RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_VERSION} \
+    && npm cache clean --force
+
+# .claude is the mountpoint for the persistent config volume; creating it here
+# owned by claude means podman's volume copy-up gets the ownership right.
+RUN mkdir -p /work /home/claude/.claude /home/claude/.npm-global \
+    && chown -R claude:claude /work /home/claude \
+    && chmod 700 /home/claude/.claude
+
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod 0755 /usr/local/bin/entrypoint.sh
+
+USER claude
+WORKDIR /work
+
+ENV HOME=/home/claude \
+    SHELL=/bin/bash \
+    CLAUDE_CONFIG_DIR=/home/claude/.claude \
+    npm_config_prefix=/home/claude/.npm-global \
+    PATH=/home/claude/.npm-global/bin:/usr/local/bin:/usr/bin:/bin:/usr/games:/usr/local/games
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+CMD ["claude"]
+CONTAINERFILE
+}
+
+# ---------------------------------------------------------------------------
+# Embedded entrypoint (runs inside the container)
+# ---------------------------------------------------------------------------
+entrypoint_text() {
+    cat <<'ENTRYPOINT'
+#!/usr/bin/env bash
+set -euo pipefail
+
+CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+SEED="/run/host-claude/.credentials.json"
+
+mkdir -p "$CONFIG_DIR"
+chmod 700 "$CONFIG_DIR"
+
+# One-time seed: copy the host's OAuth credentials into the container's own
+# config volume on first run only. After that the container refreshes its own
+# copy and never touches the host file again (which is mounted read-only).
+if [ ! -s "$CONFIG_DIR/.credentials.json" ] && [ -s "$SEED" ]; then
+    install -m 600 "$SEED" "$CONFIG_DIR/.credentials.json"
+    echo "[entrypoint] seeded credentials from host (one-time copy)" >&2
+fi
+
+if [ ! -s "$CONFIG_DIR/.credentials.json" ] && [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+    echo "[entrypoint] warning: no credentials found; run 'claude' and log in." >&2
+fi
+
+# With valid credentials present, an interactive launch still shows the
+# login/onboarding flow unless hasCompletedOnboarding is set. Headless (-p)
+# runs skip onboarding, so this only bites interactive sessions. Seed the flag
+# (and a theme, to skip the theme picker) into the config's .claude.json.
+CONFIG_JSON="$CONFIG_DIR/.claude.json"
+if [ -s "$CONFIG_DIR/.credentials.json" ] || [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+    [ -s "$CONFIG_JSON" ] || echo '{}' > "$CONFIG_JSON"
+    tmp="$(mktemp "$CONFIG_DIR/.claude.json.XXXXXX")"
+    if jq '.hasCompletedOnboarding = true
+           | .theme = (.theme // "dark")
+           | .lastOnboardingVersion = (.lastOnboardingVersion // "2.1.218")' \
+           "$CONFIG_JSON" > "$tmp" 2>/dev/null; then
+        chmod 600 "$tmp"
+        mv "$tmp" "$CONFIG_JSON"
+    else
+        rm -f "$tmp"
+        echo "[entrypoint] warning: could not update $CONFIG_JSON" >&2
+    fi
+fi
+
+# Opt-in config seeding (--seed-config on the host wrapper mounts these as
+# read-only seed sources under /run/host-claude). Copied every run so the config
+# reflects your current host config. Host paths in settings.json are rewritten
+# from $HOST_HOME/.claude to the container's $CONFIG_DIR (e.g. the statusline
+# command's script path).
+if [ -s /run/host-claude/settings.json ]; then
+    if [ -n "${HOST_HOME:-}" ]; then
+        sed "s#${HOST_HOME}/.claude#${CONFIG_DIR}#g" \
+            /run/host-claude/settings.json > "$CONFIG_DIR/settings.json"
+    else
+        cp /run/host-claude/settings.json "$CONFIG_DIR/settings.json"
+    fi
+    chmod 600 "$CONFIG_DIR/settings.json"
+    echo "[entrypoint] seeded settings.json from host" >&2
+fi
+if [ -s /run/host-claude/statusline-command.sh ]; then
+    install -m 700 /run/host-claude/statusline-command.sh \
+        "$CONFIG_DIR/statusline-command.sh"
+fi
+
+# Args passed to `podman run <image> ...` replace CMD wholesale, so re-attach
+# `claude` unless the caller clearly asked for something else (e.g. `bash`).
+# Claude subcommands are listed explicitly because some of them collide with
+# real binaries on PATH (notably `install`).
+case "${1:-}" in
+    "")
+        set -- claude
+        ;;
+    -*|config|mcp|plugin|doctor|update|install|migrate-installer|setup-token)
+        set -- claude "$@"
+        ;;
+    *)
+        command -v "$1" >/dev/null 2>&1 || set -- claude "$@"
+        ;;
+esac
+
+exec -- "$@"
+ENTRYPOINT
+}
+
+# Hash of everything that determines the image contents. Stamped onto the image
+# as a label at build time so a run can tell whether the image still matches
+# this script, and rebuild it if not.
+recipe_hash() {
+    local hasher
+    if command -v sha256sum >/dev/null 2>&1; then hasher=sha256sum
+    elif command -v shasum >/dev/null 2>&1; then hasher="shasum -a 256"
+    else echo "nohash"; return; fi
+    { containerfile_text; entrypoint_text; echo "claude=$CLAUDE_VERSION"; } \
+        | $hasher | cut -c1-16
+}
+
+# ---------------------------------------------------------------------------
+# Help
+# ---------------------------------------------------------------------------
+usage() {
+    cat <<'EOF_USAGE'
+bclaude — Claude Code in a rootless podman container.
+
+USAGE
+    bclaude [options] [claude args...]     run Claude Code on a directory
+    bclaude [options] <command> [args...]
+
+COMMANDS
+    run [args...]     Run Claude Code (default; also used when args are claude flags)
+    shell [args...]   Start a shell in the container (`bclaude shell -c 'ls /work'`)
+    build             Build/rebuild the container image
+    update            Rebuild the image with the newest Claude Code
+    doctor            Check that podman and the host are set up correctly
+    status            Show image, volume, credential and workspace state
+    install [DIR]     Copy bclaude onto your PATH (default: ~/.local/bin)
+    clean             Remove the image (add --all to remove the config volume too)
+    show <part>       Print an embedded file: containerfile | entrypoint
+    version           Print the bclaude version
+    help              This text
+
+    A command name always wins over a claude subcommand of the same name; use
+    `bclaude run <args...>` to force everything through to claude.
+
+OPTIONS
+    -w, --workspace DIR   Host directory to mount at /work        (default: $PWD)
+    -V, --volume NAME     Named volume holding ~/.claude          (default: bclaude-config)
+    -i, --image REF       Image to run                            (default: localhost/bclaude:latest)
+        --claude-version V  Claude Code npm version to bake in    (default: latest)
+        --allow-pkg       Enable `sudo apt-get` inside (relaxes two hardening flags)
+        --seed-config     Copy host settings.json + statusline into the container
+        --force-seed      Re-copy host credentials even if the volume already has some
+        --memory SIZE     Memory cap, e.g. 8g; "none" disables    (default: 4g)
+        --cpus N          CPU cap; "none" disables                (default: 2)
+        --no-limits       Shorthand for --memory none --cpus none
+        --rebuild         Rebuild the image before running
+        --no-cache        With build/update/--rebuild: ignore the layer cache
+        --no-autobuild    Fail instead of building a missing/stale image
+        --no-git-config   Don't mount ~/.gitconfig (mounted read-only by default,
+                          so `git commit` inside the container knows who you are)
+        --allow-root      Permit rootful podman. Refused by default: rootless is
+                          what keeps a container escape from becoming host root
+        --dry-run         Print the podman command instead of running it
+    -h, --help            This text
+        --                Stop parsing; everything after goes to claude
+
+    Anything bclaude does not recognise is passed through to claude, so
+    `bclaude -p "hi"` and `bclaude --model opus` work as expected.
+
+ENVIRONMENT
+    Every option has an env-var equivalent: BCLAUDE_WORKSPACE, BCLAUDE_VOLUME,
+    BCLAUDE_IMAGE, CLAUDE_VERSION, MEMORY, CPUS, TMPFS_SIZE, ALLOW_PKG=1,
+    SEED_CONFIG=1, FORCE_SEED=1, BCLAUDE_AUTOBUILD=0, BCLAUDE_GIT_CONFIG=0,
+    BCLAUDE_ALLOW_ROOT=1.
+    ANTHROPIC_API_KEY is forwarded into the container when set.
+
+EXAMPLES
+    bclaude                            # session on the current directory
+    bclaude -w ~/git/proj              # ... on another directory
+    bclaude -p "explain this repo"     # headless prompt
+    bclaude shell                      # poke around the container
+    bclaude --allow-pkg                # let Claude apt-get install things
+    bclaude doctor                     # diagnose a broken setup
+EOF_USAGE
+}
+
+# ---------------------------------------------------------------------------
+# Preflight checks
+# ---------------------------------------------------------------------------
+have() { command -v "$1" >/dev/null 2>&1; }
+
+podman_ok=""
+require_podman() {
+    [ -n "$podman_ok" ] && return 0
+    have podman || die "podman is not installed.
+  Debian/Ubuntu:  sudo apt-get install -y podman
+  Fedora/RHEL:    sudo dnf install -y podman
+  Arch:           sudo pacman -S podman
+  macOS:          brew install podman && podman machine init && podman machine start"
+    podman_ok=1
+}
+
+# `podman info` costs seconds, so the hot path never calls it: cgroup and
+# rootless state are read straight from the kernel instead. doctor still runs
+# the full `podman info` for a real diagnosis.
+is_rootless() { [ "$(id -u)" != "0" ]; }
+
+# bclaude's whole security model rests on rootless podman: a container escape
+# lands as your unprivileged user, not as root on the host. Running rootful
+# throws that away, so it has to be asked for explicitly.
+require_rootless() {
+    is_rootless && return 0
+    [ -n "$ALLOW_ROOT" ] && { warn "running rootful podman as root — container isolation is much weaker"; return 0; }
+    die "refusing to run as root.
+
+  bclaude is designed for rootless podman: containers run as your unprivileged
+  user, so a container escape cannot become host root, and files written to the
+  workspace stay owned by you.
+
+  Run it as your normal user (no sudo). If you really need rootful podman,
+  pass --allow-root (or set BCLAUDE_ALLOW_ROOT=1)."
+}
+cgroups_v2()  { [ -f /sys/fs/cgroup/cgroup.controllers ]; }
+
+# Rootless podman without a delegated memory controller cannot apply
+# --memory/--cpus; it errors out rather than ignoring them, so drop the caps
+# instead of failing the run.
+cgroup_limits_available() {
+    cgroups_v2 || return 1
+    is_rootless || return 0
+    local f
+    f="/sys/fs/cgroup/user.slice/user-$(id -u).slice/cgroup.controllers"
+    [ -r "$f" ] || return 0          # unknown layout: assume it works
+    grep -qw memory "$f"
+}
+
+check_cgroups() {
+    { [ -n "$MEMORY" ] || [ -n "$CPUS" ]; } || return 0
+    if ! cgroup_limits_available; then
+        warn "this host cannot enforce rootless memory/cpu limits (needs cgroups v2 with a delegated memory controller) — disabling them"
+        MEMORY=""; CPUS=""
+    fi
+}
+
+check_subid() {
+    local user="${USER:-$(id -un)}"
+    if [ -r /etc/subuid ] && ! grep -qE "^($user|$(id -u)):" /etc/subuid 2>/dev/null; then
+        return 1
+    fi
+    return 0
+}
+
+image_exists() { podman image exists "$IMAGE" 2>/dev/null; }
+
+image_recipe() {
+    podman image inspect "$IMAGE" \
+        --format "{{index .Labels \"$RECIPE_LABEL\"}}" 2>/dev/null || true
+}
+
+image_is_current() { [ "$(image_recipe)" = "$(recipe_hash)" ]; }
+
+# ---------------------------------------------------------------------------
+# Build
+# ---------------------------------------------------------------------------
+do_build() {
+    require_podman
+    require_rootless
+    local ctx
+    ctx="$(mktemp -d "${TMPDIR:-/tmp}/bclaude-build.XXXXXX")"
+    # shellcheck disable=SC2064
+    trap "rm -rf '$ctx'" EXIT
+    containerfile_text > "$ctx/Containerfile"
+    entrypoint_text    > "$ctx/entrypoint.sh"
+    chmod 0755 "$ctx/entrypoint.sh"
+
+    local build_args=(
+        build
+        --tag "$IMAGE"
+        --build-arg "CLAUDE_VERSION=$CLAUDE_VERSION"
+        --label "$RECIPE_LABEL=$(recipe_hash)"
+        --label "org.bclaude.version=$BCLAUDE_VERSION"
+        --file "$ctx/Containerfile"
+    )
+    [ -n "$NO_CACHE" ] && build_args+=(--no-cache)
+    build_args+=("$ctx")
+
+    if [ -n "$DRY_RUN" ]; then
+        printf 'podman'; printf ' %q' "${build_args[@]}"; printf '\n'
+        return 0
+    fi
+
+    info "building $IMAGE (claude-code@$CLAUDE_VERSION) — this takes a few minutes"
+    podman "${build_args[@]}" >&2 || die "image build failed"
+    info "${C_GRN}built${C_OFF} $IMAGE"
+}
+
+ensure_image() {
+    [ -n "$DRY_RUN" ] && return 0
+    if [ -n "$FORCE_REBUILD" ]; then do_build; return; fi
+    if ! image_exists; then
+        [ "$AUTOBUILD" = "1" ] || die "image '$IMAGE' does not exist. Run 'bclaude build'."
+        info "image '$IMAGE' not found — building it once"
+        do_build
+        return
+    fi
+    if ! image_is_current; then
+        if [ "$AUTOBUILD" = "1" ]; then
+            info "image is older than this script — rebuilding"
+            do_build
+        else
+            warn "image '$IMAGE' was built from a different bclaude recipe; run 'bclaude build'."
+        fi
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Run
+# ---------------------------------------------------------------------------
+do_run() {
+    require_podman
+    require_rootless
+    [ -d "$WORKSPACE" ] || die "workspace '$WORKSPACE' is not a directory"
+    WORKSPACE="$(cd "$WORKSPACE" && pwd)"
+    [ "$WORKSPACE" = "$HOME" ] && warn "workspace is your entire home directory — the container will see all of it"
+    if [ "$WORKSPACE" = "/" ]; then
+        die "refusing to mount / as the workspace"
+    fi
+
+    check_cgroups
+    ensure_image
+
+    if [ -z "$DRY_RUN" ]; then
+        podman volume exists "$VOLUME" 2>/dev/null || podman volume create "$VOLUME" >/dev/null
+    fi
+
+    local run_args=(
+        run --rm
+        --hostname bclaude
+        --userns=keep-id                 # host uid 1000 -> container uid 1000
+        --pids-limit 2048
+        --volume "$WORKSPACE:/work$MOUNT_SUFFIX"
+        --volume "$VOLUME:/home/claude/.claude$MOUNT_SUFFIX"
+        --workdir /work
+        --env "TERM=${TERM:-xterm-256color}"
+        --env "COLORTERM=${COLORTERM:-truecolor}"
+        # Fresh nosuid tmpfs /tmp: no dropped setuid binary can be executed from
+        # it, and it's wiped each run. exec is kept so build tools can run there.
+        --tmpfs "/tmp:rw,nosuid,nodev,exec,size=$TMPFS_SIZE"
+    )
+
+    # Only ask for a TTY when we actually have one, so CI and pipelines work.
+    [ -t 0 ] && run_args+=(--interactive --tty)
+
+    # Resource limits. Caps blast radius of a runaway/hostile process; the
+    # pids-limit above only stops fork bombs. --memory-swap == --memory disables
+    # swap growth.
+    [ -n "$MEMORY" ] && run_args+=(--memory "$MEMORY" --memory-swap "$MEMORY")
+    [ -n "$CPUS" ]   && run_args+=(--cpus "$CPUS")
+
+    # Hardening. --allow-pkg relaxes the two flags that block `sudo apt-get`:
+    # no-new-privileges (blocks the setuid escalation) and cap-drop=ALL (dpkg
+    # needs CHOWN/DAC_OVERRIDE etc.). Installs land in the container's throwaway
+    # layer; keep-id means Claude's /work edits still come out owned by you.
+    if [ -n "$ALLOW_PKG" ]; then
+        warn "--allow-pkg: sudo apt enabled inside the container, hardening relaxed"
+    else
+        run_args+=(--security-opt no-new-privileges --cap-drop=ALL)
+    fi
+
+    # Seed source for the one-time credential copy (see the entrypoint). Mounted
+    # ONLY until the config volume has its own credentials — after the first run
+    # the host token is never exposed to the container again. --force-seed
+    # re-mounts it (e.g. the seeded token expired).
+    local vol_mp
+    vol_mp="$(podman volume inspect "$VOLUME" --format '{{.Mountpoint}}' 2>/dev/null || true)"
+    if [ -s "$HOST_CREDS" ] && { [ -n "$FORCE_SEED" ] || \
+         [ -z "$vol_mp" ] || [ ! -s "$vol_mp/.credentials.json" ]; }; then
+        run_args+=(--volume "$HOST_CREDS:/run/host-claude/.credentials.json:ro$MOUNT_SUFFIX")
+    fi
+
+    # --seed-config pulls host settings.json (statusline, model, tui) and the
+    # statusline script into the container, rewriting host paths. Each is mounted
+    # read-only as a seed source; the entrypoint copies + rewrites.
+    if [ -n "$SEED_CONFIG" ]; then
+        run_args+=(--env "HOST_HOME=$HOME")
+        local f
+        for f in settings.json statusline-command.sh; do
+            [ -s "$HOME/.claude/$f" ] && \
+                run_args+=(--volume "$HOME/.claude/$f:/run/host-claude/$f:ro$MOUNT_SUFFIX")
+        done
+    fi
+
+    # Your git identity, read-only. Without it every `git commit` Claude makes
+    # inside the container fails with "please tell me who you are".
+    if [ "$GIT_CONFIG_MOUNT" = "1" ] && [ -s "$HOME/.gitconfig" ]; then
+        run_args+=(--volume "$HOME/.gitconfig:/home/claude/.gitconfig:ro$MOUNT_SUFFIX")
+    fi
+
+    # Optional: forward an API key instead of / alongside the subscription creds.
+    if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+        run_args+=(--env "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY")
+    fi
+
+    run_args+=("$IMAGE" "$@")
+
+    if [ -n "$DRY_RUN" ]; then
+        printf 'podman'; printf ' %q' "${run_args[@]}"; printf '\n'
+        return 0
+    fi
+    exec podman "${run_args[@]}"
+}
+
+# ---------------------------------------------------------------------------
+# doctor / status / clean
+# ---------------------------------------------------------------------------
+doctor_fail=0
+ok()    { printf '  %s✓%s %s\n' "$C_GRN" "$C_OFF" "$*"; }
+bad()   { printf '  %s✗%s %s\n' "$C_RED" "$C_OFF" "$*"; doctor_fail=1; }
+note()  { printf '  %s•%s %s\n' "$C_YEL" "$C_OFF" "$*"; }
+
+do_doctor() {
+    printf 'bclaude %s — environment check\n\n' "$BCLAUDE_VERSION"
+
+    if have podman; then
+        ok "podman found: $(podman --version 2>/dev/null)"
+    else
+        bad "podman not installed (apt-get/dnf/pacman install podman, or brew on macOS)"
+        printf '\n%sCannot continue without podman.%s\n' "$C_RED" "$C_OFF"
+        return 1
+    fi
+
+    local info rootless cgroups
+    if info="$(podman info --format '{{.Host.Security.Rootless}} {{.Host.CgroupsVersion}}' 2>&1)"; then
+        ok "podman is functional"
+    else
+        bad "\`podman info\` fails — podman is installed but not usable:"
+        printf '%s\n' "$info" | sed 's/^/      /' | head -n 10
+        return 1
+    fi
+    rootless="${info%% *}"
+    cgroups="${info##* }"
+    if [ "$rootless" = "true" ]; then
+        ok "running rootless (uid $(id -u))"
+    elif [ -n "$ALLOW_ROOT" ]; then
+        note "rootful podman, allowed via --allow-root — isolation is much weaker"
+    else
+        bad "rootful podman (uid $(id -u)) — bclaude requires rootless podman so a container escape cannot become host root. Run as your normal user, or pass --allow-root to override."
+    fi
+
+    if cgroup_limits_available; then ok "cgroups $cgroups — memory/cpu limits enforceable"
+    else note "cgroups $cgroups without a delegated memory controller — memory/cpu limits will be skipped"; fi
+
+    if [ "$rootless" = "true" ]; then
+        if check_subid; then ok "subuid/subgid mapping present for ${USER:-$(id -un)}"
+        else bad "no /etc/subuid entry for ${USER:-$(id -un)} — run: sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 ${USER:-$(id -un)} && podman system migrate"; fi
+    fi
+
+    if have newuidmap; then ok "newuidmap/newgidmap available"
+    else note "newuidmap not found (package: uidmap) — --userns=keep-id may fail"; fi
+
+    if [ "$(id -u)" != "1000" ] && [ "$rootless" = "true" ]; then
+        note "your uid is $(id -u), not 1000; keep-id still maps you onto the container's claude user"
+    fi
+
+    # SELinux relabelling is needed for bind mounts on Fedora/RHEL.
+    if have getenforce && [ "$(getenforce 2>/dev/null)" = "Enforcing" ]; then
+        ok "SELinux enforcing — bind mounts get the :z relabel automatically"
+    fi
+
+    if image_exists; then
+        if image_is_current; then ok "image $IMAGE present and up to date"
+        else note "image $IMAGE is stale (built from a different bclaude) — will rebuild on next run"; fi
+    else
+        note "image $IMAGE not built yet — the first run builds it (or run 'bclaude build')"
+    fi
+
+    if podman volume exists "$VOLUME" 2>/dev/null; then ok "config volume '$VOLUME' exists"
+    else note "config volume '$VOLUME' will be created on first run"; fi
+
+    if [ -n "${ANTHROPIC_API_KEY:-}" ]; then ok "ANTHROPIC_API_KEY is set and will be forwarded"
+    elif [ -s "$HOST_CREDS" ]; then ok "host credentials found at $HOST_CREDS (seeded once on first run)"
+    else note "no host credentials and no ANTHROPIC_API_KEY — you'll log in inside the container"; fi
+
+    if [ -d "$WORKSPACE" ]; then ok "workspace $WORKSPACE"
+    else bad "workspace '$WORKSPACE' is not a directory"; fi
+
+    printf '\n'
+    if [ "$doctor_fail" = "0" ]; then
+        printf '%sReady.%s Run `bclaude` in a project directory.\n' "$C_GRN" "$C_OFF"
+    else
+        printf '%sProblems found — see the ✗ lines above.%s\n' "$C_RED" "$C_OFF"
+    fi
+    return "$doctor_fail"
+}
+
+do_status() {
+    require_podman
+    printf 'bclaude %s\n' "$BCLAUDE_VERSION"
+    printf '  workspace : %s\n' "$WORKSPACE"
+    printf '  image     : %s' "$IMAGE"
+    if image_exists; then
+        printf ' (%s, %s)\n' \
+            "$(podman image inspect "$IMAGE" --format '{{.Created}}' 2>/dev/null | cut -c1-10)" \
+            "$(image_is_current && echo up-to-date || echo stale)"
+    else
+        printf ' (not built)\n'
+    fi
+    printf '  volume    : %s%s\n' "$VOLUME" \
+        "$(podman volume exists "$VOLUME" 2>/dev/null && echo '' || echo ' (not created)')"
+    local vol_mp creds="no"
+    vol_mp="$(podman volume inspect "$VOLUME" --format '{{.Mountpoint}}' 2>/dev/null || true)"
+    [ -n "$vol_mp" ] && [ -s "$vol_mp/.credentials.json" ] && creds="yes"
+    printf '  logged in : %s\n' "$creds"
+    printf '  limits    : memory=%s cpus=%s\n' "${MEMORY:-none}" "${CPUS:-none}"
+}
+
+# Copy this script somewhere on PATH so it works from any directory.
+#
+# Also supports the piped install, where there is no script file to copy:
+#   curl -fsSL <raw url>/bclaude | bash -s -- install
+# In that case the script is fetched from BCLAUDE_URL instead.
+do_install() {
+    local dest="${1:-$HOME/.local/bin}"
+    local self="" src="${BASH_SOURCE[0]:-}"
+    if [ -f "$src" ]; then
+        self="$(cd "$(dirname "$src")" && pwd)/$(basename "$src")"
+    fi
+
+    mkdir -p "$dest" || die "could not create $dest"
+
+    if [ -n "$self" ]; then
+        if [ "$self" = "$dest/bclaude" ]; then
+            info "already installed at $dest/bclaude"
+            return 0
+        fi
+        install -m 0755 "$self" "$dest/bclaude" || die "could not install to $dest"
+    else
+        # Piped from curl: no file on disk, so fetch a copy.
+        local tmp; tmp="$(mktemp "${TMPDIR:-/tmp}/bclaude.XXXXXX")"
+        # shellcheck disable=SC2064
+        trap "rm -f '$tmp'" EXIT
+        info "downloading $BCLAUDE_URL"
+        if have curl; then
+            curl -fsSL "$BCLAUDE_URL" -o "$tmp" || die "download failed: $BCLAUDE_URL"
+        elif have wget; then
+            wget -qO "$tmp" "$BCLAUDE_URL" || die "download failed: $BCLAUDE_URL"
+        else
+            die "need curl or wget to install from a pipe; download bclaude manually instead"
+        fi
+        # Refuse to install a truncated or wrong file.
+        head -n 1 "$tmp" | grep -q '^#!/usr/bin/env bash' \
+            || die "downloaded file is not the bclaude script"
+        grep -q '^BCLAUDE_VERSION=' "$tmp" || die "downloaded file looks incomplete"
+        bash -n "$tmp" 2>/dev/null || die "downloaded file does not parse — refusing to install"
+        install -m 0755 "$tmp" "$dest/bclaude" || die "could not install to $dest"
+    fi
+
+    info "${C_GRN}installed${C_OFF} $dest/bclaude"
+    case ":$PATH:" in
+        *":$dest:"*) info "run 'bclaude doctor' to check your setup" ;;
+        *) warn "$dest is not on your PATH — add this to your shell rc:
+    export PATH=\"$dest:\$PATH\"" ;;
+    esac
+}
+
+do_clean() {
+    require_podman
+    local all=""
+    [ "${1:-}" = "--all" ] && all=1
+    if image_exists; then
+        podman rmi -f "$IMAGE" >/dev/null && info "removed image $IMAGE"
+    else
+        info "image $IMAGE not present"
+    fi
+    if [ -n "$all" ]; then
+        if podman volume exists "$VOLUME" 2>/dev/null; then
+            printf 'Remove config volume %s (sessions + credentials)? [y/N] ' "$VOLUME" >&2
+            local reply; read -r reply || reply=""
+            case "$reply" in
+                [yY]*) podman volume rm "$VOLUME" >/dev/null && info "removed volume $VOLUME" ;;
+                *) info "kept volume $VOLUME" ;;
+            esac
+        fi
+    else
+        info "config volume $VOLUME kept (use 'bclaude clean --all' to remove it)"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+# bclaude options are recognised only until the first thing we don't own; from
+# there on everything is handed to claude untouched.
+parse_opts() {
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -w|--workspace) WORKSPACE="${2:?--workspace needs a directory}"; shift 2 ;;
+            -V|--volume)    VOLUME="${2:?--volume needs a name}"; shift 2 ;;
+            -i|--image)     IMAGE="${2:?--image needs a reference}"; shift 2 ;;
+            --claude-version) CLAUDE_VERSION="${2:?--claude-version needs a value}"; shift 2 ;;
+            --memory)       MEMORY="${2:?--memory needs a value}"; [ "$MEMORY" = none ] && MEMORY=""; shift 2 ;;
+            --cpus)         CPUS="${2:?--cpus needs a value}"; [ "$CPUS" = none ] && CPUS=""; shift 2 ;;
+            --no-limits)    MEMORY=""; CPUS=""; shift ;;
+            --allow-pkg)    ALLOW_PKG=1; shift ;;
+            --seed-config)  SEED_CONFIG=1; shift ;;
+            --force-seed)   FORCE_SEED=1; shift ;;
+            --rebuild)      FORCE_REBUILD=1; shift ;;
+            --no-cache)     NO_CACHE=1; shift ;;
+            --no-autobuild) AUTOBUILD=0; shift ;;
+            --no-git-config) GIT_CONFIG_MOUNT=0; shift ;;
+            --allow-root)   ALLOW_ROOT=1; shift ;;
+            --dry-run)      DRY_RUN=1; shift ;;
+            -h|--help)      usage; exit 0 ;;
+            --version)      echo "bclaude $BCLAUDE_VERSION"; exit 0 ;;
+            --)             shift; break ;;
+            *)              break ;;
+        esac
+    done
+    REST=("$@")
+}
+
+main() {
+    parse_opts "$@"
+    set -- ${REST[@]+"${REST[@]}"}
+
+    # SELinux systems need the relabel suffix on bind mounts.
+    MOUNT_SUFFIX=""
+    if have getenforce && [ "$(getenforce 2>/dev/null)" = "Enforcing" ]; then
+        MOUNT_SUFFIX=",z"
+    fi
+
+    case "${1:-}" in
+        help)    usage ;;
+        version) echo "bclaude $BCLAUDE_VERSION" ;;
+        doctor)  do_doctor ;;
+        status)  do_status ;;
+        build)   do_build ;;
+        update)  CLAUDE_VERSION="latest"; NO_CACHE=1; do_build ;;
+        clean)   shift; do_clean "$@" ;;
+        install) shift; do_install "$@" ;;
+        show)
+            case "${2:-}" in
+                containerfile) containerfile_text ;;
+                entrypoint)    entrypoint_text ;;
+                *) die "show what? try: bclaude show containerfile | bclaude show entrypoint" ;;
+            esac ;;
+        shell)   shift; do_run bash "$@" ;;
+        run)     shift; do_run "$@" ;;
+        *)       do_run "$@" ;;
+    esac
+}
+
+main "$@"

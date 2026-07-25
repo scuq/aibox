@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  lint:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: Lint bclaude and the embedded entrypoint
+        run: |
+          shellcheck -S warning bclaude tests/run-tests.sh
+          ./bclaude show entrypoint > /tmp/entrypoint.sh
+          shellcheck -S warning /tmp/entrypoint.sh
+
+  test-fast:
+    name: unit tests (no podman)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: tests/run-tests.sh --fast
+
+  test-full:
+    name: build + run the container
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install podman
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y podman uidmap
+          podman --version
+      - name: Doctor
+        run: ./bclaude doctor
+      - name: Full test suite
+        run: tests/run-tests.sh
