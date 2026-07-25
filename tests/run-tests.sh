@@ -89,6 +89,14 @@ check_contains "mounts the workspace at /work" ":/work" -- \
     "$BCLAUDE" --workspace "$HERE" --dry-run
 check_contains "workspace flag is honoured" "$HERE:/work" -- \
     "$BCLAUDE" --workspace "$HERE" --dry-run
+check_not_contains "workspace is writable by default" ":/work:ro" -- "$BCLAUDE" --dry-run
+check_contains "--ro mounts the workspace read-only" ":/work:ro" -- "$BCLAUDE" --ro --dry-run
+check_contains "--ro says so" "read-only" -- "$BCLAUDE" --ro --dry-run
+check_contains "BCLAUDE_RO=1 mounts read-only" ":/work:ro" -- \
+    env BCLAUDE_RO=1 "$BCLAUDE" --dry-run
+check_contains "--ro leaves the config volume writable" "myvol:/home/claude/.claude" -- \
+    "$BCLAUDE" --ro --volume myvol --dry-run
+check_contains "help documents --ro" "--ro " -- "$BCLAUDE" help
 check_contains "hardening on by default" "--cap-drop=ALL" -- "$BCLAUDE" --dry-run
 check_contains "no-new-privileges on by default" "no-new-privileges" -- "$BCLAUDE" --dry-run
 check_not_contains "--allow-pkg drops cap-drop" "--cap-drop=ALL" -- \
@@ -199,6 +207,10 @@ else
             podman run --rm --entrypoint bash "$BCLAUDE_IMAGE" -lc id
         check_contains "workspace mount lands in /work" "hello-from-host" -- \
             bash -c "printf hello-from-host > '$HERE/.probe' && \"$BCLAUDE\" --workspace '$HERE' shell -c 'cat /work/.probe'; rm -f '$HERE/.probe'"
+        check_contains "--ro makes /work unwritable in the container" "Read-only file system" -- \
+            bash -c "\"$BCLAUDE\" --ro --workspace '$HERE' shell -c 'touch /work/.rocheck' 2>&1; rm -f '$HERE/.rocheck'"
+        check_status "--ro still allows reads and writes elsewhere" 0 -- \
+            "$BCLAUDE" --ro --workspace "$HERE" shell -c 'ls /work >/dev/null && touch /tmp/x && touch "$HOME/.claude/x"'
         check_contains "entrypoint routes unknown args to claude" "claude" -- \
             podman run --rm "$BCLAUDE_IMAGE" --version
         check_contains "config dir is the mounted volume" "/home/claude/.claude" -- \

@@ -37,6 +37,7 @@ bclaude -p "explain this repo"      # claude flags pass straight through
 bclaude --model opus                # ... any of them
 bclaude -w ~/git/proj               # mount a different directory
 bclaude shell                       # a shell in the container instead
+bclaude --ro -p "review this repo"  # read-only workspace: it cannot write anything
 bclaude --allow-pkg                 # let Claude `sudo apt-get install` things
 bclaude doctor                      # diagnose a broken setup
 bclaude status                      # image / volume / login state
@@ -71,6 +72,7 @@ Every option has an env-var equivalent, so both `bclaude -w ~/p` and
 | Option | Env | Default | Effect |
 | --- | --- | --- | --- |
 | `-w, --workspace DIR` | `BCLAUDE_WORKSPACE` | `$PWD` | Host dir mounted at `/work` — the only host path Claude can reach |
+| `--ro` | `BCLAUDE_RO=1` | off | Mount the workspace read-only — Claude can read `/work`, never write it |
 | `-V, --volume NAME` | `BCLAUDE_VOLUME` | `bclaude-config` | Named volume for `~/.claude` (sessions, settings, credentials) |
 | `-i, --image REF` | `BCLAUDE_IMAGE` | `localhost/bclaude:latest` | Image to run |
 | `--claude-version V` | `CLAUDE_VERSION` | `latest` | Claude Code npm version baked into the image |
@@ -92,7 +94,9 @@ Every option has an env-var equivalent, so both `bclaude -w ~/p` and
   Rootless podman is what keeps a container escape from becoming host root; with
   rootful podman the sandbox is worth much less.
 - **Workspace** `/work` is the only host project path mounted; everything else
-  is throwaway container fs.
+  is throwaway container fs. `--ro` mounts it read-only for analysis and review
+  sessions — Claude keeps working (the config volume and `/tmp` stay writable),
+  it just cannot change your files.
 - **`--userns=keep-id`** maps container uid 1000 → your host user, so files
   Claude writes in `/work` are owned by you (why the image renames `node` →
   `claude`).

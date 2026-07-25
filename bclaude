@@ -29,6 +29,7 @@ TMPFS_SIZE="${TMPFS_SIZE:-512m}"
 ALLOW_PKG="${ALLOW_PKG:-}"
 SEED_CONFIG="${SEED_CONFIG:-}"
 FORCE_SEED="${FORCE_SEED:-}"
+READONLY_WORKSPACE="${BCLAUDE_RO:-}"         # 1 mounts /work read-only
 AUTOBUILD="${BCLAUDE_AUTOBUILD:-1}"          # 0 disables build-on-demand
 GIT_CONFIG_MOUNT="${BCLAUDE_GIT_CONFIG:-1}"  # 0 disables mounting ~/.gitconfig
 ALLOW_ROOT="${BCLAUDE_ALLOW_ROOT:-}"         # 1 permits rootful podman
@@ -252,6 +253,8 @@ OPTIONS
     -V, --volume NAME     Named volume holding ~/.claude          (default: bclaude-config)
     -i, --image REF       Image to run                            (default: localhost/bclaude:latest)
         --claude-version V  Claude Code npm version to bake in    (default: latest)
+        --ro              Mount the workspace read-only — Claude can read /work
+                          but never write to it. Pairs well with -p
         --allow-pkg       Enable `sudo apt-get` inside (relaxes two hardening flags)
         --seed-config     Copy host settings.json + statusline into the container
         --force-seed      Re-copy host credentials even if the volume already has some
@@ -275,8 +278,8 @@ OPTIONS
 ENVIRONMENT
     Every option has an env-var equivalent: BCLAUDE_WORKSPACE, BCLAUDE_VOLUME,
     BCLAUDE_IMAGE, CLAUDE_VERSION, MEMORY, CPUS, TMPFS_SIZE, ALLOW_PKG=1,
-    SEED_CONFIG=1, FORCE_SEED=1, BCLAUDE_AUTOBUILD=0, BCLAUDE_GIT_CONFIG=0,
-    BCLAUDE_ALLOW_ROOT=1.
+    SEED_CONFIG=1, FORCE_SEED=1, BCLAUDE_RO=1, BCLAUDE_AUTOBUILD=0,
+    BCLAUDE_GIT_CONFIG=0, BCLAUDE_ALLOW_ROOT=1.
     ANTHROPIC_API_KEY is forwarded into the container when set.
 
 EXAMPLES
@@ -284,6 +287,7 @@ EXAMPLES
     bclaude -w ~/git/proj              # ... on another directory
     bclaude -p "explain this repo"     # headless prompt
     bclaude shell                      # poke around the container
+    bclaude --ro -p "review this"      # read-only session, nothing can be written
     bclaude --allow-pkg                # let Claude apt-get install things
     bclaude doctor                     # diagnose a broken setup
 EOF_USAGE
@@ -438,12 +442,21 @@ do_run() {
         podman volume exists "$VOLUME" 2>/dev/null || podman volume create "$VOLUME" >/dev/null
     fi
 
+    # --ro: /work goes in read-only, so an analysis or review session cannot
+    # touch the project at all. Everything Claude needs to write during a run
+    # (the config volume, /tmp) is elsewhere, so this is a working setup.
+    local ws_opts="$MOUNT_SUFFIX"
+    if [ -n "$READONLY_WORKSPACE" ]; then
+        ws_opts=":ro$MOUNT_SUFFIX"
+        info "workspace mounted read-only"
+    fi
+
     local run_args=(
         run --rm
         --hostname bclaude
         --userns=keep-id                 # host uid 1000 -> container uid 1000
         --pids-limit 2048
-        --volume "$WORKSPACE:/work$MOUNT_SUFFIX"
+        --volume "$WORKSPACE:/work$ws_opts"
         --volume "$VOLUME:/home/claude/.claude$MOUNT_SUFFIX"
         --workdir /work
         --env "TERM=${TERM:-xterm-256color}"
@@ -601,7 +614,9 @@ do_doctor() {
 do_status() {
     require_podman
     printf 'bclaude %s\n' "$BCLAUDE_VERSION"
-    printf '  workspace : %s\n' "$WORKSPACE"
+    local ws_note=""
+    [ -n "$READONLY_WORKSPACE" ] && ws_note=" (read-only)"
+    printf '  workspace : %s%s\n' "$WORKSPACE" "$ws_note"
     printf '  image     : %s' "$IMAGE"
     if image_exists; then
         printf ' (%s, %s)\n' \
@@ -706,6 +721,7 @@ parse_opts() {
             --memory)       MEMORY="${2:?--memory needs a value}"; [ "$MEMORY" = none ] && MEMORY=""; shift 2 ;;
             --cpus)         CPUS="${2:?--cpus needs a value}"; [ "$CPUS" = none ] && CPUS=""; shift 2 ;;
             --no-limits)    MEMORY=""; CPUS=""; shift ;;
+            --ro|--read-only) READONLY_WORKSPACE=1; shift ;;
             --allow-pkg)    ALLOW_PKG=1; shift ;;
             --seed-config)  SEED_CONFIG=1; shift ;;
             --force-seed)   FORCE_SEED=1; shift ;;
