@@ -2,8 +2,8 @@
 
 <img src="assets/bclaude.svg" alt="" width="96" align="right">
 
-Run [Claude Code](https://claude.com/claude-code) inside a rootless podman
-container. It sees one directory of yours and nothing else.
+Run the [Claude Code](https://claude.com/claude-code) CLI inside a rootless
+podman container. It sees one directory of yours and nothing else.
 
 Everything is in a single script — the Containerfile and the container
 entrypoint are embedded in it, so one download is the whole install.
@@ -38,14 +38,12 @@ Requires rootless [podman](https://podman.io) and nothing else on the host.
 ```bash
 bclaude                             # interactive session on $PWD
 bclaude -p "explain this repo"      # claude flags pass straight through
-bclaude --model opus                # ... any of them
 bclaude -w ~/git/proj               # mount a different directory
 bclaude shell                       # a shell in the container instead
 bclaude --ro -p "review this repo"  # read-only workspace: it cannot write anything
 bclaude --volume-per-project        # config volume of its own for this repo
 bclaude --allow-pkg                 # let Claude `sudo apt-get install` things
 bclaude doctor                      # diagnose a broken setup
-bclaude status                      # image / volume / login state
 bclaude update                      # rebuild with the newest Claude Code
 bclaude clean --all                 # remove image + every config volume + the login
 ```
@@ -67,6 +65,7 @@ bclaude clean --all                 # remove image + every config volume + the l
 | `clean --list` | List the auth volume and the config volumes, with the project each belongs to |
 | `clean --prune` | Drop per-project volumes whose project directory is gone (`--yes` to skip the prompt) |
 | `show containerfile` / `show entrypoint` | Print the embedded files (to inspect or fork) |
+| `version` | Print the bclaude version |
 
 A command name wins over a same-named claude subcommand — use `bclaude run
 install` to force something through to claude.
@@ -74,20 +73,18 @@ install` to force something through to claude.
 ## Options
 
 Every option has an env-var equivalent, so both `bclaude -w ~/p` and
-`BCLAUDE_WORKSPACE=~/p bclaude` work.
-
-`BCLAUDE_WORKSPACE`, `BCLAUDE_VOLUME`, `BCLAUDE_AUTH_VOLUME` and `BCLAUDE_IMAGE`
-are read only under those names — bare `WORKSPACE`, `VOLUME`, `AUTH_VOLUME` and
-`IMAGE` are ignored. They are common words to have exported for something else,
-and they pick what gets mounted and what `bclaude clean` deletes, so a stray
-`export IMAGE=` should not be able to aim `podman rmi -f` at your own image.
+`BCLAUDE_WORKSPACE=~/p bclaude` work. Note the `BCLAUDE_` prefix on workspace,
+volume, auth volume and image: bare `WORKSPACE`, `VOLUME`, `AUTH_VOLUME` and
+`IMAGE` are deliberately ignored, since they pick what gets mounted and what
+`bclaude clean` deletes — a stray `export IMAGE=` should not be able to aim
+`podman rmi -f` at your own image.
 
 | Option | Env | Default | Effect |
 | --- | --- | --- | --- |
 | `-w, --workspace DIR` | `BCLAUDE_WORKSPACE` | `$PWD` | Host dir mounted at `/work` — the only host path Claude can reach |
 | `--ro` | `BCLAUDE_RO=1` | off | Mount the workspace read-only — Claude can read `/work`, never write it |
 | `-V, --volume NAME` | `BCLAUDE_VOLUME` | `bclaude-config` | Named volume for `~/.claude` (sessions, settings; not the login) |
-| `--volume-per-project` | `BCLAUDE_VOLUME_PER_PROJECT=1` | off | A config volume per workspace instead of one shared one (see [Config volumes](#config-volumes)) |
+| `--volume-per-project` | `BCLAUDE_VOLUME_PER_PROJECT=1` | off | A config volume per workspace (see [Config volumes](#config-volumes)) |
 | `--auth-volume NAME` | `BCLAUDE_AUTH_VOLUME` | `bclaude-auth` | Volume holding the login, shared by every project |
 | `-i, --image REF` | `BCLAUDE_IMAGE` | `localhost/bclaude:latest` | Image to run |
 | `--claude-version V` | `CLAUDE_VERSION` | `latest` | Claude Code npm version baked into the image |
@@ -105,30 +102,27 @@ and they pick what gets mounted and what `bclaude clean` deletes, so a stray
 
 ## How it's wired
 
-- **Rootless only** running as root is refused unless you pass `--allow-root`.
-  Rootless podman is what keeps a container escape from becoming host root; with
-  rootful podman the sandbox is worth much less.
-- **Workspace** `/work` is the only host project path mounted; everything else
-  is throwaway container fs. `--ro` mounts it read-only for analysis and review
-  sessions — Claude keeps working (the config volume and `/tmp` stay writable),
-  it just cannot change your files.
+- **Rootless only** — running as root is refused unless you pass `--allow-root`.
+  Rootless podman is what keeps a container escape from becoming host root.
+- **Workspace** — `/work` is the only host project path mounted; everything else
+  is throwaway container fs. `--ro` mounts it read-only for review sessions:
+  Claude keeps working (config volume and `/tmp` stay writable), it just cannot
+  change your files.
 - **`--userns=keep-id:uid=1000,gid=1000`** maps your host user onto the image's
   `claude` user (uid/gid 1000), so files Claude writes in `/work` are owned by
-  you (why the image renames `node` → `claude`). The `uid=`/`gid=` part matters
-  whenever your host uid is not 1000: plain `keep-id` would map you to your own
-  number instead, leaving the container process — still uid 1000, from the
-  image's `USER` — unable to write a workspace owned by you.
-- **Config** lives in the `bclaude-config` volume at `/home/claude/.claude`,
-  separate from your host `~/.claude` — one volume shared by every project, or
-  one per project with `--volume-per-project`. The login is not in there: it
-  sits in its own `bclaude-auth` volume that every project shares.
-- **Network** default rootless (pasta), unrestricted outbound — needed for
+  you — that's why the image renames `node` → `claude`. The explicit `uid=`/`gid=`
+  matters when your host uid isn't 1000: plain `keep-id` would leave the
+  container process unable to write a workspace owned by you.
+- **Config** — lives in the `bclaude-config` volume, separate from your host
+  `~/.claude`. The login is not in there; it sits in its own `bclaude-auth`
+  volume that every project shares.
+- **Network** — default rootless (pasta), unrestricted outbound: needed for
   npm/pip/git and the API.
-- **Hardening** `cap-drop=ALL`, `no-new-privileges`, seccomp, `pids-limit 2048`,
+- **Hardening** — `cap-drop=ALL`, `no-new-privileges`, seccomp, `pids-limit 2048`,
   memory/cpu caps, `nosuid` tmpfs `/tmp`, setuid stripped from all but `sudo`.
-- **Image freshness** the image is stamped with a hash of the embedded
-  Containerfile + entrypoint. Edit the script and the next run rebuilds itself.
-- **Portability** SELinux hosts get the `:z` mount relabel automatically; hosts
+- **Image freshness** — the image is stamped with a hash of the embedded
+  Containerfile + entrypoint, so editing the script rebuilds it on the next run.
+- **Portability** — SELinux hosts get the `:z` mount relabel automatically; hosts
   that can't enforce rootless cgroup limits get them dropped with a warning
   instead of a podman error; a TTY is only requested when there is one, so
   `bclaude -p ...` works in pipes and CI.
@@ -144,10 +138,9 @@ There are two volumes, and the split is the point:
 By default every project shares that one config volume too, so what you did in
 one repo is visible in the next. `--volume-per-project` gives each workspace its
 own, named after the directory plus a hash of its full path
-(`bclaude-config-myrepo-1a2b3c4d`) — so two repos called `api` in different
-places don't collide, and the name stays the same no matter how you spell the
-path. `-V/--volume` still wins when you name one; the auth volume is unaffected
-either way, so a new project is **not** a new login.
+(`bclaude-config-myrepo-1a2b3c4d`), so two repos called `api` don't collide and
+the name doesn't change with how you spell the path. The auth volume is
+unaffected either way: a new project is **not** a new login.
 
 ```bash
 bclaude --volume-per-project      # this repo gets its own sessions and settings
@@ -156,17 +149,15 @@ bclaude clean --prune             # drop volumes whose project directory is gone
 ```
 
 Claude Code only knows about one config directory, so the entrypoint copies the
-login in from the auth volume at startup and writes it back out when the session
+login in from the auth volume at startup and writes it back when the session
 ends — the token gets refreshed while you work, and that refresh has to reach
 your other projects. It writes back only a token this session actually changed,
-and stands aside if a session that started alongside it refreshed after it began,
-so running several at once does not put a spent token back over a live one.
+and stands aside if a session that started alongside it refreshed later, so
+running several at once won't put a spent token over a live one.
 
-Volumes bclaude creates are labelled (`org.bclaude.managed`, `org.bclaude.role`,
-and the project path for per-project ones), which is how `--list` and `--prune`
-know what they are looking at. `--prune` only ever considers volumes whose
-recorded project directory no longer exists — never the shared config volume,
-never the auth volume.
+Volumes bclaude creates are labelled, which is how `--list` and `--prune` know
+what they're looking at. `--prune` only ever considers per-project volumes whose
+recorded project directory is gone — never the shared config or auth volume.
 
 Isolation caveat: separate config volumes separate *state*, not trust. Every
 project's container mounts the same auth volume, so anything that runs in one
@@ -176,8 +167,8 @@ can read the login.
 
 **Your host token stays on your host.** bclaude does not copy
 `~/.claude/.credentials.json` anywhere: the container logs in on its own the
-first time you run it, and that login is stored in the `bclaude-auth` volume.
-It's a one-time step for all your projects — every later run picks it up.
+first time you run it, and that login is stored in the `bclaude-auth` volume —
+a one-time step for all your projects.
 
 | How to be logged in | What it costs you |
 | --- | --- |
@@ -187,8 +178,8 @@ It's a one-time step for all your projects — every later run picks it up.
 
 `--seed-creds` mounts the host file read-only and the entrypoint copies it in,
 replacing any login already there — which makes it the fix for a seeded token
-that went stale, too. The entrypoint also sets `hasCompletedOnboarding: true`
-once credentials exist, so interactive launches skip the onboarding flow.
+that went stale, too. Once credentials exist the entrypoint sets
+`hasCompletedOnboarding: true`, so interactive launches skip the onboarding flow.
 
 Caveats: whichever way you log in, the token ends up in the auth volume, which
 every project's container mounts and anything running as the container user can
@@ -225,12 +216,11 @@ tests/run-tests.sh --fast    # ~0.5s, no podman needed: parsing, flags, arg rout
 tests/run-tests.sh           # also builds the image and runs the container
 ```
 
-Safe to run on a machine you actually use bclaude on. The suite clears every
+Safe to run on a machine you actually use bclaude on: the suite clears every
 `BCLAUDE_*` variable from your environment and works only on
 `localhost/bclaude-test:latest`, `bclaude-test-config` and `bclaude-test-auth`,
-which it removes when it finishes (`BCLAUDE_KEEP=1` keeps them); the cleanup
-refuses to touch anything not named like a test artifact. It never reads your
-host credentials and never writes outside the volumes above, `tests/` and
+which it removes when it finishes (`BCLAUDE_KEEP=1` keeps them). It never reads
+your host credentials and never writes outside those volumes, `tests/` and
 `mktemp` directories. The full run does build an image (a few minutes, needs
 network) and start containers.
 

@@ -374,7 +374,7 @@ OPTIONS
                           but never write to it. Pairs well with -p
         --allow-pkg       Enable `sudo apt-get` inside (relaxes two hardening flags)
         --seed-config     Copy host settings.json + statusline into the container
-        --seed-creds      Copy the host's Claude login into the config volume,
+        --seed-creds      Copy the host's Claude login into the auth volume,
                           replacing any login already there. Off by default: the
                           container logs in on its own, so the host refresh token
                           is never exposed. Also the way to replace a stale token
@@ -722,7 +722,7 @@ do_run() {
 
     # Credential seeding is opt-in. By default the host's OAuth refresh token is
     # never exposed to the container, not even once: you log in inside instead,
-    # and that login lives in the config volume. --seed-creds mounts the host
+    # and that login lives in the auth volume. --seed-creds mounts the host
     # file read-only as a seed source, and the entrypoint copies it in — every
     # time it is passed, so it doubles as the fix for a token that went stale.
     if [ -n "$SEED_CREDS" ]; then
