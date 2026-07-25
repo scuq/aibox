@@ -206,8 +206,9 @@ sudo is scoped to `apt-get`/`apt`/`dpkg` in `/etc/sudoers.d/claude-apt`.
 - **keep-id**: correct `/work` ownership, but an escape lands as your host user
   rather than a throwaway subuid.
 - **Unrestricted egress**: the container can reach your LAN and host services
-  (e.g. Postgres:5432). Claude needs the API, so the useful restriction isn't
-  `--network=none` but an allowlist proxy that permits only `api.anthropic.com`.
+  (e.g. Postgres:5432). Claude needs the API, so a useful restriction  would be
+  an allowlist proxy that permits only `api.anthropic.com`, but this is not there,
+  yet.
 
 ## Tests
 
