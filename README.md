@@ -43,7 +43,7 @@ bclaude --allow-pkg                 # let Claude `sudo apt-get install` things
 bclaude doctor                      # diagnose a broken setup
 bclaude status                      # image / volume / login state
 bclaude update                      # rebuild with the newest Claude Code
-bclaude clean --all                 # remove image + config volume (+ the login)
+bclaude clean --all                 # remove image + every config volume + the login
 ```
 
 `bclaude help` prints the full interface.
@@ -59,7 +59,7 @@ bclaude clean --all                 # remove image + config volume (+ the login)
 | `doctor` | Check podman, rootless setup, cgroups, subuid, image, credentials |
 | `status` | Image, volumes, credential and workspace state |
 | `install [DIR]` | Copy `bclaude` onto your PATH (default `~/.local/bin`); also works piped from curl |
-| `clean [--all]` | Remove the image; `--all` also offers to drop the config volume and the login |
+| `clean [--all]` | Remove the image; `--all` also offers to drop every config volume and the login |
 | `clean --list` | List the auth volume and the config volumes, with the project each belongs to |
 | `clean --prune` | Drop per-project volumes whose project directory is gone (`--yes` to skip the prompt) |
 | `show containerfile` / `show entrypoint` | Print the embedded files (to inspect or fork) |

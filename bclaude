@@ -281,8 +281,9 @@ COMMANDS
     doctor            Check that podman and the host are set up correctly
     status            Show image, volumes, credential and workspace state
     install [DIR]     Copy bclaude onto your PATH (default: ~/.local/bin)
-    clean [--all]     Remove the image; --all also offers the config volume
-    clean --list      List bclaude config volumes, their project and login state
+    clean [--all]     Remove the image; --all also offers every config volume
+                      and the login
+    clean --list      List the auth volume and the config volumes with their projects
     clean --prune     Remove per-project volumes whose project directory is gone
     show <part>       Print an embedded file: containerfile | entrypoint
     version           Print the bclaude version
@@ -945,17 +946,29 @@ do_clean() {
         info "image $IMAGE not present"
     fi
     if [ -n "$all" ]; then
-        local reply
-        if podman volume exists "$VOLUME" 2>/dev/null; then
-            printf 'Remove config volume %s (sessions + project settings)? [y/N] ' "$VOLUME" >&2
+        # --all means all of them: with --volume-per-project there is a config
+        # volume per repo, and removing only the one for the current directory
+        # would leave the rest behind while claiming to have cleaned up. They
+        # are named before the prompt so nobody deletes a project's sessions
+        # without seeing it coming. The login is asked for separately: it is a
+        # different kind of loss.
+        local vols v ws reply
+        vols="$(all_bclaude_volumes)"
+        if [ -n "$vols" ]; then
+            printf 'Config volumes to remove (sessions + project settings):\n' >&2
+            while IFS= read -r v; do
+                ws="$(volume_workspace "$v")"
+                printf '  %s%s\n' "$v" "${ws:+  ($ws)}" >&2
+            done <<< "$vols"
+            printf 'Remove them? [y/N] ' >&2
             read -r reply || reply=""
             case "$reply" in
-                [yY]*) podman volume rm "$VOLUME" >/dev/null && info "removed volume $VOLUME" ;;
-                *) info "kept volume $VOLUME" ;;
+                [yY]*) while IFS= read -r v; do
+                           podman volume rm "$v" >/dev/null && info "removed volume $v"
+                       done <<< "$vols" ;;
+                *) info "kept the config volumes" ;;
             esac
         fi
-        # The login is a volume of its own now, so --all has to ask separately
-        # or it would quietly stop meaning "remove everything".
         if podman volume exists "$AUTH_VOLUME" 2>/dev/null; then
             printf 'Remove auth volume %s (logs you out of every project)? [y/N] ' "$AUTH_VOLUME" >&2
             read -r reply || reply=""
@@ -965,7 +978,7 @@ do_clean() {
             esac
         fi
     else
-        info "config volume $VOLUME and auth volume $AUTH_VOLUME kept (use 'bclaude clean --all' to remove them)"
+        info "config volumes and auth volume $AUTH_VOLUME kept (use 'bclaude clean --all' to remove them, 'bclaude clean --list' to see them)"
     fi
 }
 

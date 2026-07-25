@@ -243,6 +243,8 @@ with_stubs() {   # with_stubs <stdin> <function> [args...]
         }
         volume_has_creds() { case "$1" in *auth*) return 0 ;; *) return 1 ;; esac; }
         podman() { printf "PODMAN %s\n" "$*" >&2; }
+        require_podman() { :; }
+        image_exists() { return 1; }
         VOLUME=bclaude-config-live-aaaa
         AUTH_VOLUME=bclaude-stub-auth
         fn="$1"; shift
@@ -277,6 +279,23 @@ check_not_contains "prune leaves a live project alone" "live-aaaa" -- \
     with_stubs y prune_volumes
 check_not_contains "prune never touches a shared volume" "shared-cccc" -- \
     with_stubs y prune_volumes
+
+# --all has to cover every config volume, not just the one for this directory.
+check_contains "clean --all names every config volume before asking" \
+    "bclaude-config-gone-bbbb" -- with_stubs n do_clean --all
+check_contains "clean --all also names the current one" \
+    "bclaude-config-live-aaaa" -- with_stubs n do_clean --all
+check_contains "clean --all shows which project a volume belongs to" "$HERE" -- \
+    with_stubs n do_clean --all
+check_contains "clean --all asks about the login separately" "logs you out" -- \
+    with_stubs n do_clean --all
+check_contains "answering no to clean --all keeps the config volumes" \
+    "kept the config volumes" -- with_stubs n do_clean --all
+check_contains "answering yes to clean --all removes all of them" \
+    "removed volume bclaude-config-shared-cccc" -- with_stubs y do_clean --all
+check_not_contains "plain clean removes no volume" "removed volume" -- \
+    with_stubs "" do_clean
+check_contains "plain clean says where to look" "clean --list" -- with_stubs "" do_clean
 
 section "rootless requirement"
 
