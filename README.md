@@ -154,10 +154,10 @@ one-time step per volume — every later run picks it up.
 | `--seed-creds` | copies your host login into the volume — convenient, but the host refresh token is now in there too |
 
 `--seed-creds` mounts the host file read-only and the entrypoint copies it into
-the volume, replacing any login already there. That makes it the fix for a
-seeded token that went stale, too (the older `--force-seed` spelling still
-works). The entrypoint also sets `hasCompletedOnboarding: true` once credentials
-exist, so interactive launches skip the onboarding flow.
+the volume, replacing any login already there — which makes it the fix for a
+seeded token that went stale, too. The entrypoint also sets
+`hasCompletedOnboarding: true` once credentials exist, so interactive launches
+skip the onboarding flow.
 
 Caveats: whichever way you log in, the token ends up in the volume, readable by
 anything running as the container user (same as on your host); and with

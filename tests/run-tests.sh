@@ -135,12 +135,6 @@ check_contains "--seed-creds mounts host creds read-only" \
     env HOST_CREDS="$tmpcreds" "$BCLAUDE" --seed-creds --dry-run
 check_contains "SEED_CREDS=1 seeds as well" "/run/host-claude/.credentials.json:ro" -- \
     env HOST_CREDS="$tmpcreds" SEED_CREDS=1 "$BCLAUDE" --dry-run
-check_contains "--force-seed still works as an alias" "/run/host-claude/.credentials.json:ro" -- \
-    env HOST_CREDS="$tmpcreds" "$BCLAUDE" --force-seed --dry-run
-check_contains "--force-seed points at the new name" "now --seed-creds" -- \
-    env HOST_CREDS="$tmpcreds" "$BCLAUDE" --force-seed --dry-run
-check_contains "FORCE_SEED=1 still works as an alias" "/run/host-claude/.credentials.json:ro" -- \
-    env HOST_CREDS="$tmpcreds" FORCE_SEED=1 "$BCLAUDE" --dry-run
 check_contains "--seed-creds without host creds warns" "no host credentials" -- \
     env HOST_CREDS=/nonexistent/.credentials.json "$BCLAUDE" --seed-creds --dry-run
 check_contains "help documents --seed-creds" "--seed-creds" -- "$BCLAUDE" help
