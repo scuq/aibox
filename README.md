@@ -1,10 +1,14 @@
 # bclaude
 
+<img src="assets/bclaude.svg" alt="" width="96" align="right">
+
 Run [Claude Code](https://claude.com/claude-code) inside a rootless podman
 container. It sees one directory of yours and nothing else.
 
 Everything is in a single script — the Containerfile and the container
 entrypoint are embedded in it, so one download is the whole install.
+
+**WARNING: Use at your own risk!**
 
 ## Install
 

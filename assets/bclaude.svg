@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="bclaude">
+  <title>bclaude</title>
+  <rect x="8" y="8" width="496" height="496" rx="48" fill="#141413"/>
+  <rect x="8.5" y="8.5" width="495" height="495" rx="47.5" fill="none" stroke="#3B3A36" stroke-width="1"/>
+  <g fill="#D97757">
+    <path d="M 237 83 A 19 19 0 0 1 275 83 L 257.5 254 A 1.5 1.5 0 0 1 254.5 254 Z" transform="rotate(0 256 256)"/>
+    <path d="M 237 83 A 19 19 0 0 1 275 83 L 257.5 254 A 1.5 1.5 0 0 1 254.5 254 Z" transform="rotate(32.7273 256 256)"/>
+    <path d="M 237 83 A 19 19 0 0 1 275 83 L 257.5 254 A 1.5 1.5 0 0 1 254.5 254 Z" transform="rotate(65.4545 256 256)"/>
+    <path d="M 237 83 A 19 19 0 0 1 275 83 L 257.5 254 A 1.5 1.5 0 0 1 254.5 254 Z" transform="rotate(98.1818 256 256)"/>
+    <path d="M 237 83 A 19 19 0 0 1 275 83 L 257.5 254 A 1.5 1.5 0 0 1 254.5 254 Z" transform="rotate(130.909 256 256)"/>
+    <path d="M 237 83 A 19 19 0 0 1 275 83 L 257.5 254 A 1.5 1.5 0 0 1 254.5 254 Z" transform="rotate(163.636 256 256)"/>
+    <path d="M 237 83 A 19 19 0 0 1 275 83 L 257.5 254 A 1.5 1.5 0 0 1 254.5 254 Z" transform="rotate(196.364 256 256)"/>
+    <path d="M 237 83 A 19 19 0 0 1 275 83 L 257.5 254 A 1.5 1.5 0 0 1 254.5 254 Z" transform="rotate(229.091 256 256)"/>
+    <path d="M 237 83 A 19 19 0 0 1 275 83 L 257.5 254 A 1.5 1.5 0 0 1 254.5 254 Z" transform="rotate(261.818 256 256)"/>
+    <path d="M 237 83 A 19 19 0 0 1 275 83 L 257.5 254 A 1.5 1.5 0 0 1 254.5 254 Z" transform="rotate(294.545 256 256)"/>
+    <path d="M 237 83 A 19 19 0 0 1 275 83 L 257.5 254 A 1.5 1.5 0 0 1 254.5 254 Z" transform="rotate(327.273 256 256)"/>
+  </g>
+</svg>
