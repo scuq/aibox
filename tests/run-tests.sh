@@ -123,11 +123,45 @@ check_not_contains "--no-git-config drops the gitconfig mount" ".gitconfig" -- \
 check_contains "run forces claude subcommands through" "latest install" -- \
     "$BCLAUDE" --dry-run run install
 
-# A seeded credential file must be mounted read-only and nowhere else.
+section "credential seeding"
+
+# Seeding is opt-in: the host token must not be mounted unless asked for, and
+# when it is asked for it must be read-only and nowhere else.
 tmpcreds="$(mktemp)"; echo '{"x":1}' > "$tmpcreds"
-check_contains "host creds mounted read-only" "$tmpcreds:/run/host-claude/.credentials.json:ro" -- \
+check_not_contains "host creds are not seeded by default" "host-claude" -- \
     env HOST_CREDS="$tmpcreds" "$BCLAUDE" --dry-run
+check_contains "--seed-creds mounts host creds read-only" \
+    "$tmpcreds:/run/host-claude/.credentials.json:ro" -- \
+    env HOST_CREDS="$tmpcreds" "$BCLAUDE" --seed-creds --dry-run
+check_contains "SEED_CREDS=1 seeds as well" "/run/host-claude/.credentials.json:ro" -- \
+    env HOST_CREDS="$tmpcreds" SEED_CREDS=1 "$BCLAUDE" --dry-run
+check_contains "--force-seed still works as an alias" "/run/host-claude/.credentials.json:ro" -- \
+    env HOST_CREDS="$tmpcreds" "$BCLAUDE" --force-seed --dry-run
+check_contains "--force-seed points at the new name" "now --seed-creds" -- \
+    env HOST_CREDS="$tmpcreds" "$BCLAUDE" --force-seed --dry-run
+check_contains "FORCE_SEED=1 still works as an alias" "/run/host-claude/.credentials.json:ro" -- \
+    env HOST_CREDS="$tmpcreds" FORCE_SEED=1 "$BCLAUDE" --dry-run
+check_contains "--seed-creds without host creds warns" "no host credentials" -- \
+    env HOST_CREDS=/nonexistent/.credentials.json "$BCLAUDE" --seed-creds --dry-run
+check_contains "help documents --seed-creds" "--seed-creds" -- "$BCLAUDE" help
+check_contains "help says seeding is off by default" "Off by default" -- "$BCLAUDE" help
 rm -f "$tmpcreds"
+
+# The first-login hint replaces the seed, so it has to actually say something
+# useful. Sourced directly: it is suppressed under --dry-run.
+hint() {   # hint [claude args...]
+    bash -c '
+        eval "$(sed "s/^main \"\$@\"$//" '"$BCLAUDE"')" 2>/dev/null || true
+        VOLUME=testvol
+        HOST_CREDS=/nonexistent/.credentials.json
+        first_login_hint "$@"
+    ' _ "$@"
+}
+check_contains "first-login hint explains the container login" \
+    "log in inside the container" -- hint
+check_contains "first-login hint says it is one-time" "one-time step per volume" -- hint
+check_contains "headless without a login is called out" "no way to log in" -- hint -p hello
+check_status "first-login hint succeeds without host creds" 0 -- hint
 
 section "rootless requirement"
 
@@ -217,6 +251,24 @@ else
             "$BCLAUDE" shell -c 'echo $CLAUDE_CONFIG_DIR'
         check_status "run exits cleanly through the wrapper" 0 -- \
             "$BCLAUDE" shell -c 'true'
+        # Seeding end to end: the entrypoint copies the mounted seed into the
+        # volume with mode 600, and it stays there on later runs without it.
+        seeddir="$(mktemp -d)"; printf '{"seed":1}' > "$seeddir/.credentials.json"
+        check_contains "--seed-creds copies the token into the volume" '{"seed":1}' -- \
+            env HOST_CREDS="$seeddir/.credentials.json" "$BCLAUDE" --seed-creds shell -c \
+            'cat "$HOME/.claude/.credentials.json"'
+        check_contains "seeded credentials are mode 600" "600" -- \
+            env HOST_CREDS="$seeddir/.credentials.json" "$BCLAUDE" --seed-creds shell -c \
+            'stat -c %a "$HOME/.claude/.credentials.json"'
+        check_contains "the login persists without the flag" '{"seed":1}' -- \
+            env HOST_CREDS="$seeddir/.credentials.json" "$BCLAUDE" shell -c \
+            'cat "$HOME/.claude/.credentials.json"'
+        printf '{"seed":2}' > "$seeddir/.credentials.json"
+        check_contains "--seed-creds replaces a stale token" '{"seed":2}' -- \
+            env HOST_CREDS="$seeddir/.credentials.json" "$BCLAUDE" --seed-creds shell -c \
+            'cat "$HOME/.claude/.credentials.json"'
+        rm -rf "$seeddir"
+
         check_contains "image carries the recipe label" "org.bclaude.recipe" -- \
             podman image inspect "$BCLAUDE_IMAGE" --format '{{json .Labels}}'
         check_contains "status reports the image as up to date" "up-to-date" -- \

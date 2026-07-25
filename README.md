@@ -80,7 +80,7 @@ Every option has an env-var equivalent, so both `bclaude -w ~/p` and
 | | `TMPFS_SIZE` | `512m` | Size of the `nosuid` tmpfs at `/tmp` |
 | `--allow-pkg` | `ALLOW_PKG=1` | off | Passwordless `sudo apt` (relaxes two hardening flags — see below) |
 | `--seed-config` | `SEED_CONFIG=1` | off | Copy host `settings.json` (model, tui, statusline) + statusline script in, rewriting host paths |
-| `--force-seed` | `FORCE_SEED=1` | off | Re-copy host credentials to replace a stale token |
+| `--seed-creds` | `SEED_CREDS=1` | off | Copy the host's Claude login into the config volume (see [Credentials](#credentials)) |
 | `--no-git-config` | `BCLAUDE_GIT_CONFIG=0` | mounted | `~/.gitconfig` is mounted read-only so `git commit` works inside |
 | `--allow-root` | `BCLAUDE_ALLOW_ROOT=1` | off | Permit rootful podman — refused by default (see below) |
 | `--rebuild` / `--no-cache` | | off | Rebuild the image before running |
@@ -115,17 +115,28 @@ Every option has an env-var equivalent, so both `bclaude -w ~/p` and
 
 ## Credentials
 
-Your `~/.claude/.credentials.json` is mounted read-only and copied into the
-volume **once, on first run only** — later runs never expose the host token.
-The entrypoint also sets `hasCompletedOnboarding: true` so interactive launches
-skip the login flow.
+**Your host token stays on your host.** bclaude does not copy
+`~/.claude/.credentials.json` anywhere: the container logs in on its own the
+first time you run it, and that login is stored in the config volume. It's a
+one-time step per volume — every later run picks it up.
 
-Caveats: the token then lives in the volume (readable by anything running as the
-container user — same as on your host); and host + container hold independent
-copies of the refresh token, so a rotation may force one side to re-auth. For
-full isolation use `ANTHROPIC_API_KEY`, or a container-only login: `bclaude
-clean --all`, then run with `HOST_CREDS=/nonexistent bclaude` and log in inside.
-**If untrusted code ran in the container, rotate by re-logging in on the host.**
+| How to be logged in | What it costs you |
+| --- | --- |
+| **Log in inside the container** (default) | one login prompt per config volume; the host token is never exposed |
+| `ANTHROPIC_API_KEY` | forwarded into the container when set; no OAuth token involved |
+| `--seed-creds` | copies your host login into the volume — convenient, but the host refresh token is now in there too |
+
+`--seed-creds` mounts the host file read-only and the entrypoint copies it into
+the volume, replacing any login already there. That makes it the fix for a
+seeded token that went stale, too (the older `--force-seed` spelling still
+works). The entrypoint also sets `hasCompletedOnboarding: true` once credentials
+exist, so interactive launches skip the onboarding flow.
+
+Caveats: whichever way you log in, the token ends up in the volume, readable by
+anything running as the container user (same as on your host); and with
+`--seed-creds` host and container hold independent copies of the refresh token,
+so a rotation may force one side to re-auth. **If untrusted code ran in the
+container, rotate by re-logging in on the host.**
 
 ## Installing packages (`--allow-pkg`)
 

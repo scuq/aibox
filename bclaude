@@ -28,7 +28,10 @@ CPUS="${CPUS:-2}"                            # empty disables the cpu cap
 TMPFS_SIZE="${TMPFS_SIZE:-512m}"
 ALLOW_PKG="${ALLOW_PKG:-}"
 SEED_CONFIG="${SEED_CONFIG:-}"
-FORCE_SEED="${FORCE_SEED:-}"
+SEED_CREDS="${SEED_CREDS:-}"                 # 1 copies the host token in
+# FORCE_SEED/--force-seed was the old name for this, back when seeding happened
+# by default and the flag was needed to repeat it. Still accepted.
+if [ -n "${FORCE_SEED:-}" ]; then SEED_CREDS=1; fi
 READONLY_WORKSPACE="${BCLAUDE_RO:-}"         # 1 mounts /work read-only
 AUTOBUILD="${BCLAUDE_AUTOBUILD:-1}"          # 0 disables build-on-demand
 GIT_CONFIG_MOUNT="${BCLAUDE_GIT_CONFIG:-1}"  # 0 disables mounting ~/.gitconfig
@@ -137,12 +140,14 @@ SEED="/run/host-claude/.credentials.json"
 mkdir -p "$CONFIG_DIR"
 chmod 700 "$CONFIG_DIR"
 
-# One-time seed: copy the host's OAuth credentials into the container's own
-# config volume on first run only. After that the container refreshes its own
-# copy and never touches the host file again (which is mounted read-only).
-if [ ! -s "$CONFIG_DIR/.credentials.json" ] && [ -s "$SEED" ]; then
+# Copy the host's OAuth credentials into the container's own config volume. The
+# seed is mounted (read-only) only when the caller asked for it with
+# --seed-creds, so its presence is the instruction: copy it in, replacing
+# whatever is there — that is how a stale seeded token gets refreshed. Without
+# the flag there is no seed and the container logs in on its own.
+if [ -s "$SEED" ]; then
     install -m 600 "$SEED" "$CONFIG_DIR/.credentials.json"
-    echo "[entrypoint] seeded credentials from host (one-time copy)" >&2
+    echo "[entrypoint] seeded credentials from host" >&2
 fi
 
 if [ ! -s "$CONFIG_DIR/.credentials.json" ] && [ -z "${ANTHROPIC_API_KEY:-}" ]; then
@@ -257,7 +262,10 @@ OPTIONS
                           but never write to it. Pairs well with -p
         --allow-pkg       Enable `sudo apt-get` inside (relaxes two hardening flags)
         --seed-config     Copy host settings.json + statusline into the container
-        --force-seed      Re-copy host credentials even if the volume already has some
+        --seed-creds      Copy the host's Claude login into the config volume,
+                          replacing any login already there. Off by default: the
+                          container logs in on its own, so the host refresh token
+                          is never exposed. Also the way to replace a stale token
         --memory SIZE     Memory cap, e.g. 8g; "none" disables    (default: 4g)
         --cpus N          CPU cap; "none" disables                (default: 2)
         --no-limits       Shorthand for --memory none --cpus none
@@ -278,8 +286,9 @@ OPTIONS
 ENVIRONMENT
     Every option has an env-var equivalent: BCLAUDE_WORKSPACE, BCLAUDE_VOLUME,
     BCLAUDE_IMAGE, CLAUDE_VERSION, MEMORY, CPUS, TMPFS_SIZE, ALLOW_PKG=1,
-    SEED_CONFIG=1, FORCE_SEED=1, BCLAUDE_RO=1, BCLAUDE_AUTOBUILD=0,
-    BCLAUDE_GIT_CONFIG=0, BCLAUDE_ALLOW_ROOT=1.
+    SEED_CONFIG=1, SEED_CREDS=1, BCLAUDE_RO=1, BCLAUDE_AUTOBUILD=0,
+    BCLAUDE_GIT_CONFIG=0, BCLAUDE_ALLOW_ROOT=1. HOST_CREDS points at the host
+    credentials file used by --seed-creds.
     ANTHROPIC_API_KEY is forwarded into the container when set.
 
 EXAMPLES
@@ -360,6 +369,36 @@ check_subid() {
 }
 
 image_exists() { podman image exists "$IMAGE" 2>/dev/null; }
+
+volume_mountpoint() {
+    podman volume inspect "$VOLUME" --format '{{.Mountpoint}}' 2>/dev/null || true
+}
+
+volume_has_creds() {   # volume_has_creds [mountpoint]
+    local mp="${1:-$(volume_mountpoint)}"
+    [ -n "$mp" ] && [ -s "$mp/.credentials.json" ]
+}
+
+# Credentials are not seeded from the host by default, so a fresh volume means a
+# login inside the container. Say so up front rather than letting the login
+# prompt appear unexplained — and refuse to pretend a headless run will work.
+first_login_hint() {
+    local a headless=""
+    for a in "$@"; do
+        case "$a" in -p|--print) headless=1; break ;; esac
+    done
+    if [ -n "$headless" ]; then
+        warn "no login in volume '$VOLUME' and no ANTHROPIC_API_KEY — a headless run has no way to log in.
+  Run 'bclaude' once interactively to log in, or pass --seed-creds to copy your host login into the volume."
+    else
+        info "no login in volume '$VOLUME' yet — Claude will ask you to log in inside the container"
+        info "that is a one-time step per volume; the login is stored there, not on your host"
+        if [ -s "$HOST_CREDS" ]; then
+            info "to reuse your host login instead, re-run with --seed-creds"
+        fi
+    fi
+    return 0
+}
 
 image_recipe() {
     podman image inspect "$IMAGE" \
@@ -485,15 +524,19 @@ do_run() {
         run_args+=(--security-opt no-new-privileges --cap-drop=ALL)
     fi
 
-    # Seed source for the one-time credential copy (see the entrypoint). Mounted
-    # ONLY until the config volume has its own credentials — after the first run
-    # the host token is never exposed to the container again. --force-seed
-    # re-mounts it (e.g. the seeded token expired).
-    local vol_mp
-    vol_mp="$(podman volume inspect "$VOLUME" --format '{{.Mountpoint}}' 2>/dev/null || true)"
-    if [ -s "$HOST_CREDS" ] && { [ -n "$FORCE_SEED" ] || \
-         [ -z "$vol_mp" ] || [ ! -s "$vol_mp/.credentials.json" ]; }; then
-        run_args+=(--volume "$HOST_CREDS:/run/host-claude/.credentials.json:ro$MOUNT_SUFFIX")
+    # Credential seeding is opt-in. By default the host's OAuth refresh token is
+    # never exposed to the container, not even once: you log in inside instead,
+    # and that login lives in the config volume. --seed-creds mounts the host
+    # file read-only as a seed source, and the entrypoint copies it in — every
+    # time it is passed, so it doubles as the fix for a token that went stale.
+    if [ -n "$SEED_CREDS" ]; then
+        if [ -s "$HOST_CREDS" ]; then
+            run_args+=(--volume "$HOST_CREDS:/run/host-claude/.credentials.json:ro$MOUNT_SUFFIX")
+        else
+            warn "--seed-creds: no host credentials at $HOST_CREDS — you'll log in inside the container"
+        fi
+    elif [ -z "${ANTHROPIC_API_KEY:-}" ] && [ -z "$DRY_RUN" ] && ! volume_has_creds; then
+        first_login_hint "$@"
     fi
 
     # --seed-config pulls host settings.json (statusline, model, tui) and the
@@ -595,9 +638,13 @@ do_doctor() {
     if podman volume exists "$VOLUME" 2>/dev/null; then ok "config volume '$VOLUME' exists"
     else note "config volume '$VOLUME' will be created on first run"; fi
 
-    if [ -n "${ANTHROPIC_API_KEY:-}" ]; then ok "ANTHROPIC_API_KEY is set and will be forwarded"
-    elif [ -s "$HOST_CREDS" ]; then ok "host credentials found at $HOST_CREDS (seeded once on first run)"
-    else note "no host credentials and no ANTHROPIC_API_KEY — you'll log in inside the container"; fi
+    if [ -n "$SEED_CREDS" ] && [ -s "$HOST_CREDS" ]; then
+        ok "--seed-creds: $HOST_CREDS will be copied into volume '$VOLUME' on the next run"
+    elif volume_has_creds; then ok "volume '$VOLUME' has its own login"
+    elif [ -n "${ANTHROPIC_API_KEY:-}" ]; then ok "ANTHROPIC_API_KEY is set and will be forwarded"
+    elif [ -s "$HOST_CREDS" ]; then
+        note "no login yet — the first run logs in inside the container (host credentials exist at $HOST_CREDS but are only used if you pass --seed-creds)"
+    else note "no login yet and no ANTHROPIC_API_KEY — you'll log in inside the container"; fi
 
     if [ -d "$WORKSPACE" ]; then ok "workspace $WORKSPACE"
     else bad "workspace '$WORKSPACE' is not a directory"; fi
@@ -627,9 +674,10 @@ do_status() {
     fi
     printf '  volume    : %s%s\n' "$VOLUME" \
         "$(podman volume exists "$VOLUME" 2>/dev/null && echo '' || echo ' (not created)')"
-    local vol_mp creds="no"
-    vol_mp="$(podman volume inspect "$VOLUME" --format '{{.Mountpoint}}' 2>/dev/null || true)"
-    [ -n "$vol_mp" ] && [ -s "$vol_mp/.credentials.json" ] && creds="yes"
+    local creds="no (logs in inside the container on first run)"
+    volume_has_creds && creds="yes"
+    [ -n "$SEED_CREDS" ] && [ -s "$HOST_CREDS" ] && \
+        creds="$creds; --seed-creds copies $HOST_CREDS in"
     printf '  logged in : %s\n' "$creds"
     printf '  limits    : memory=%s cpus=%s\n' "${MEMORY:-none}" "${CPUS:-none}"
 }
@@ -724,7 +772,10 @@ parse_opts() {
             --ro|--read-only) READONLY_WORKSPACE=1; shift ;;
             --allow-pkg)    ALLOW_PKG=1; shift ;;
             --seed-config)  SEED_CONFIG=1; shift ;;
-            --force-seed)   FORCE_SEED=1; shift ;;
+            --seed-creds)   SEED_CREDS=1; shift ;;
+            --force-seed)   SEED_CREDS=1
+                            warn "--force-seed is now --seed-creds (which always re-copies)"
+                            shift ;;
             --rebuild)      FORCE_REBUILD=1; shift ;;
             --no-cache)     NO_CACHE=1; shift ;;
             --no-autobuild) AUTOBUILD=0; shift ;;
