@@ -12,11 +12,34 @@ BCLAUDE="${BCLAUDE:-$HERE/../bclaude}"
 FAST=""
 [ "${1:-}" = "--fast" ] && FAST=1
 
-# Isolate from the user's real image/volume/credentials.
-export BCLAUDE_IMAGE="${BCLAUDE_IMAGE:-localhost/bclaude-test:latest}"
-export BCLAUDE_VOLUME="${BCLAUDE_VOLUME:-bclaude-test-config}"
-export BCLAUDE_AUTH_VOLUME="${BCLAUDE_AUTH_VOLUME:-bclaude-test-auth}"
-export HOST_CREDS="${HOST_CREDS:-/nonexistent/.credentials.json}"
+# Isolate from the user's real image/volumes/credentials. These are set, not
+# defaulted: inheriting them would point the suite — including the cleanup that
+# removes volumes and the image at the end — at whatever the caller happens to
+# have exported. The rest are cleared because they change what the dry-run
+# assertions expect, or would leak a real token into a test container.
+unset BCLAUDE_WORKSPACE BCLAUDE_VOLUME BCLAUDE_AUTH_VOLUME BCLAUDE_IMAGE \
+      BCLAUDE_VOLUME_PER_PROJECT BCLAUDE_RO BCLAUDE_AUTOBUILD BCLAUDE_GIT_CONFIG \
+      BCLAUDE_ALLOW_ROOT WORKSPACE VOLUME AUTH_VOLUME IMAGE CLAUDE_VERSION \
+      MEMORY CPUS TMPFS_SIZE ALLOW_PKG SEED_CONFIG SEED_CREDS HOST_CREDS \
+      ANTHROPIC_API_KEY
+export BCLAUDE_IMAGE=localhost/bclaude-test:latest
+export BCLAUDE_VOLUME=bclaude-test-config
+export BCLAUDE_AUTH_VOLUME=bclaude-test-auth
+export HOST_CREDS=/nonexistent/.credentials.json
+
+# Belt and braces for the cleanup: only ever remove things named like ours.
+rm_test_volume() {
+    case "$1" in
+        bclaude-test-*) podman volume rm -f "$1" >/dev/null 2>&1 || true ;;
+        *) printf '  !! refusing to remove volume %s (not a test volume)\n' "$1" ;;
+    esac
+}
+rm_test_image() {
+    case "$1" in
+        *bclaude-test*) podman rmi -f "$1" >/dev/null 2>&1 || true ;;
+        *) printf '  !! refusing to remove image %s (not a test image)\n' "$1" ;;
+    esac
+}
 
 pass=0; fail=0
 ok()   { printf '  ok   %s\n' "$1"; pass=$((pass+1)); }
@@ -421,7 +444,7 @@ else
             "$BCLAUDE" shell -c 'cat "$HOME/.claude/.credentials.json"'
         check_contains "the auth volume holds the login, not the config volume" '{"seed":3}' -- \
             bash -c "cat \"\$(podman volume inspect '$BCLAUDE_AUTH_VOLUME' --format '{{.Mountpoint}}')/.credentials.json\""
-        podman volume rm -f bclaude-test-config2 >/dev/null 2>&1 || true
+        rm_test_volume bclaude-test-config2
 
         check_contains "image carries the recipe label" "org.bclaude.recipe" -- \
             podman image inspect "$BCLAUDE_IMAGE" --format '{{json .Labels}}'
@@ -434,9 +457,9 @@ else
     if [ -n "${BCLAUDE_KEEP:-}" ]; then
         printf '  .... keeping %s, %s and %s (BCLAUDE_KEEP set)\n' "$BCLAUDE_IMAGE" "$BCLAUDE_VOLUME" "$BCLAUDE_AUTH_VOLUME"
     else
-        podman volume rm -f "$BCLAUDE_VOLUME" >/dev/null 2>&1 || true
-        podman volume rm -f "$BCLAUDE_AUTH_VOLUME" >/dev/null 2>&1 || true
-        podman rmi -f "$BCLAUDE_IMAGE" >/dev/null 2>&1 || true
+        rm_test_volume "$BCLAUDE_VOLUME"
+        rm_test_volume "$BCLAUDE_AUTH_VOLUME"
+        rm_test_image  "$BCLAUDE_IMAGE"
     fi
 fi
 

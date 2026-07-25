@@ -210,6 +210,15 @@ tests/run-tests.sh --fast    # ~0.5s, no podman needed: parsing, flags, arg rout
 tests/run-tests.sh           # also builds the image and runs the container
 ```
 
+Safe to run on a machine you actually use bclaude on. The suite clears every
+`BCLAUDE_*` variable from your environment and works only on
+`localhost/bclaude-test:latest`, `bclaude-test-config` and `bclaude-test-auth`,
+which it removes when it finishes (`BCLAUDE_KEEP=1` keeps them); the cleanup
+refuses to touch anything not named like a test artifact. It never reads your
+host credentials and never writes outside the volumes above, `tests/` and
+`mktemp` directories. The full run does build an image (a few minutes, needs
+network) and start containers.
+
 CI (`.github/workflows/ci.yml`) runs shellcheck, the fast suite, and the full
 suite with a real podman build on every push.
 
