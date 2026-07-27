@@ -43,6 +43,9 @@ bclaude shell                       # a shell in the container instead
 bclaude --ro -p "review this repo"  # read-only workspace: it cannot write anything
 bclaude --volume-per-project        # config volume of its own for this repo
 bclaude --allow-pkg                 # let Claude `sudo apt-get install` things
+bclaude --egress proxy              # outbound traffic allowlisted and logged
+bclaude egress denied               # what the allowlist blocked, by domain
+bclaude devcontainer                # VS Code into the container, same setup
 bclaude doctor                      # diagnose a broken setup
 bclaude update                      # rebuild with the newest Claude Code
 bclaude clean --all                 # remove image + every config volume + the login
@@ -61,10 +64,12 @@ bclaude clean --all                 # remove image + every config volume + the l
 | `doctor` | Check podman, rootless setup, cgroups, subuid, image, credentials |
 | `status` | Image, volumes, credential and workspace state |
 | `install [DIR]` | Copy `bclaude` onto your PATH (default `~/.local/bin`); also works piped from curl |
-| `clean [--all]` | Remove the image; `--all` also offers to drop every config volume and the login |
+| `egress [SUB]` | Egress proxy control: `status`, `denied`, `allow <domain..>`, `log [-f]`, `start`, `reload`, `stop` (see [Egress filtering](#egress-filtering---egress-proxy)) |
+| `devcontainer` | Write `.devcontainer/devcontainer.json` so VS Code attaches into the same image, volumes and hardening (see [VS Code](#vs-code-devcontainer)) |
+| `clean [--all]` | Remove the image, egress proxy and networks; `--all` also offers to drop every config volume and the login |
 | `clean --list` | List the auth volume and the config volumes, with the project each belongs to |
 | `clean --prune` | Drop per-project volumes whose project directory is gone (`--yes` to skip the prompt) |
-| `show containerfile` / `show entrypoint` | Print the embedded files (to inspect or fork) |
+| `show <part>` | Print an embedded file: `containerfile`, `entrypoint`, `squid-conf`, `allowlist` |
 | `version` | Print the bclaude version |
 
 A command name wins over a same-named claude subcommand — use `bclaude run
@@ -90,6 +95,11 @@ volume, auth volume and image: bare `WORKSPACE`, `VOLUME`, `AUTH_VOLUME` and
 | `--claude-version V` | `CLAUDE_VERSION` | `latest` | Claude Code npm version baked into the image |
 | `--memory SIZE` / `--cpus N` | `MEMORY` / `CPUS` | `4g` / `2` | Resource caps; `none` or `--no-limits` disables |
 | | `TMPFS_SIZE` | `512m` | Size of the `nosuid` tmpfs at `/tmp` |
+| `--egress MODE` | `BCLAUDE_EGRESS` | `open` | `proxy` restricts outbound traffic to an allowlist, logged per request (see [Egress filtering](#egress-filtering---egress-proxy)) |
+| | `BCLAUDE_EGRESS_SUBNET` | `10.199.0.0/24` | Subnet of the internal network (change on collision with your LAN) |
+| | `BCLAUDE_PROXY_IMAGE` | `docker.io/ubuntu/squid:latest` | Image for the egress sidecar |
+| | `BCLAUDE_PROXY_LOG_DRIVER` | podman default | Log driver for the sidecar, e.g. `journald` to forward the audit trail |
+| | `BCLAUDE_ALLOWLIST` | `~/.config/bclaude/allowlist` | The egress allowlist file |
 | `--allow-pkg` | `ALLOW_PKG=1` | off | Passwordless `sudo apt` (relaxes two hardening flags — see below) |
 | `--seed-config` | `SEED_CONFIG=1` | off | Copy host `settings.json` (model, tui, statusline) + statusline script in, rewriting host paths |
 | `--seed-creds` | `SEED_CREDS=1` | off | Copy the host's Claude login into the auth volume (see [Credentials](#credentials)) |
@@ -117,7 +127,9 @@ volume, auth volume and image: bare `WORKSPACE`, `VOLUME`, `AUTH_VOLUME` and
   `~/.claude`. The login is not in there; it sits in its own `bclaude-auth`
   volume that every project shares.
 - **Network** — default rootless (pasta), unrestricted outbound: needed for
-  npm/pip/git and the API.
+  npm/pip/git and the API. `--egress proxy` swaps that for an internal network
+  whose only way out is an allowlisting squid sidecar — see
+  [Egress filtering](#egress-filtering---egress-proxy).
 - **Hardening** — `cap-drop=ALL`, `no-new-privileges`, seccomp, `pids-limit 2048`,
   memory/cpu caps, `nosuid` tmpfs `/tmp`, setuid stripped from all but `sudo`.
 - **Image freshness** — the image is stamped with a hash of the embedded
@@ -201,14 +213,93 @@ Containerfile in the script (`bclaude show containerfile` to see it) and run
 `bclaude build`. `--allow-pkg` relaxes `no-new-privileges` + `cap-drop=ALL`;
 sudo is scoped to `apt-get`/`apt`/`dpkg` in `/etc/sudoers.d/claude-apt`.
 
+## Egress filtering (`--egress proxy`)
+
+```bash
+bclaude --egress proxy            # this session can only reach allowlisted domains
+bclaude egress denied             # what got blocked, counted by domain
+bclaude egress allow api.foo.com  # extend the allowlist, live
+bclaude egress log -f             # follow the audit trail (one line per request)
+```
+
+Not nftables inside the container — `--cap-drop=ALL` plus a non-root user means
+nothing in there could load a ruleset anyway, and granting `NET_ADMIN` to get
+one would trade away more than it buys. Instead the *network layout* is the
+enforcement:
+
+- The claude container joins only an **internal podman network**
+  (`bclaude-internal`): no route off-host, no external DNS. There is nothing to
+  reach except the sidecar.
+- A **squid sidecar** (`bclaude-proxy`) sits on that network and an ordinary
+  one, enforcing a `dstdomain` allowlist, deny-by-default. `HTTPS_PROXY` etc.
+  are set in the claude container only so tools know where the one door is.
+- One log line per request lands on the sidecar's stdout, so
+  `podman logs bclaude-proxy` is the audit trail (`BCLAUDE_PROXY_LOG_DRIVER=journald`
+  if you'd rather it landed somewhere forwardable).
+
+This closes DNS exfiltration too: the container cannot resolve external names
+at all — squid does all resolution on its outward leg.
+
+The allowlist lives at `~/.config/bclaude/allowlist`, seeded on first use from
+the [Claude Code network requirements](https://code.claude.com/docs/en/network-config)
+plus common dev hosts (npm, pip, github, apt), each line commented with what it
+is for so trimming is informed (`bclaude show allowlist` prints the default).
+`bclaude egress allow <domain>` appends and reloads the live proxy; after
+editing the file by hand, run `bclaude egress reload`. The tuning loop is:
+run a session, see what broke, `bclaude egress denied`, allow what you meant.
+
+Caveats, honestly:
+
+- **git over SSH does not work** in proxy mode (nothing but the proxy is
+  reachable, and squid only speaks HTTP). Use https remotes.
+- **An allowed domain is still a channel**: with `github.com` on the list,
+  code that can push can exfiltrate. Trim the list for review sessions
+  (`--ro --egress proxy` is a good pairing).
+- `--allow-pkg` + proxy mode: sudo strips the proxy env, so pass it through
+  apt explicitly:
+  `sudo apt-get -o Acquire::http::Proxy="$http_proxy" -o Acquire::https::Proxy="$https_proxy" update`.
+- The sidecar and its networks persist across sessions (cheap, and shared by
+  concurrent sessions); `bclaude egress stop` or `bclaude clean` removes them.
+  The allowlist file is never deleted.
+
+## VS Code (devcontainer)
+
+The Claude Code extension talks to the CLI over a loopback WebSocket on a
+random port (advertised in `$CLAUDE_CONFIG_DIR/ide/<port>.lock`) — exactly the
+thing a separate network namespace can't reach. So bclaude doesn't try to
+bridge it; it moves the VS Code server *into* the container instead:
+
+```bash
+cd ~/git/my-project
+bclaude devcontainer              # writes .devcontainer/devcontainer.json
+# in VS Code: "Dev Containers: Reopen in Container"
+```
+
+The generated file uses the same image, volumes, userns mapping and hardening
+flags as `bclaude` itself, so the extension, the CLI and your session state all
+behave identically — diffs and selection context included, because everything
+shares the container's loopback. Requires the Dev Containers extension with
+`"dev.containers.dockerPath": "podman"`.
+
+It honours the current flags: `bclaude --volume-per-project devcontainer`
+pins this repo's config volume, and `bclaude --egress proxy devcontainer`
+puts the whole IDE session behind the egress allowlist (run
+`bclaude egress start` before opening the container; the VS Code server
+download hosts are in the default allowlist). Regenerate with `--force` after
+changing your mind.
+
+If you only want a terminal in VS Code and no diff view, you don't need any of
+this — a terminal profile that runs `bclaude` is a two-line settings change.
+
 ## Known trade-offs
 
 - **keep-id**: correct `/work` ownership, but an escape lands as your host user
   rather than a throwaway subuid.
-- **Unrestricted egress**: the container can reach your LAN and host services
-  (e.g. Postgres:5432). Claude needs the API, so a useful restriction  would be
-  an allowlist proxy that permits only `api.anthropic.com`, but this is not there,
-  yet.
+- **Egress is open by default**: the container can reach your LAN and host
+  services (e.g. Postgres:5432). `--egress proxy` closes this down to an
+  allowlist — but an allowed domain is still a usable channel, and the default
+  list includes github.com. See
+  [Egress filtering](#egress-filtering---egress-proxy).
 
 ## Tests
 

@@ -21,7 +21,8 @@ unset BCLAUDE_WORKSPACE BCLAUDE_VOLUME BCLAUDE_AUTH_VOLUME BCLAUDE_IMAGE \
       BCLAUDE_VOLUME_PER_PROJECT BCLAUDE_RO BCLAUDE_AUTOBUILD BCLAUDE_GIT_CONFIG \
       BCLAUDE_ALLOW_ROOT WORKSPACE VOLUME AUTH_VOLUME IMAGE CLAUDE_VERSION \
       MEMORY CPUS TMPFS_SIZE ALLOW_PKG SEED_CONFIG SEED_CREDS HOST_CREDS \
-      ANTHROPIC_API_KEY
+      ANTHROPIC_API_KEY BCLAUDE_EGRESS BCLAUDE_EGRESS_SUBNET BCLAUDE_PROXY_IMAGE \
+      BCLAUDE_PROXY_LOG_DRIVER BCLAUDE_ALLOWLIST
 export BCLAUDE_IMAGE=localhost/bclaude-test:latest
 export BCLAUDE_VOLUME=bclaude-test-config
 export BCLAUDE_AUTH_VOLUME=bclaude-test-auth
@@ -146,6 +147,91 @@ check_not_contains "--no-git-config drops the gitconfig mount" ".gitconfig" -- \
     "$BCLAUDE" --no-git-config --dry-run
 check_contains "run forces claude subcommands through" "latest install" -- \
     "$BCLAUDE" --dry-run run install
+
+section "egress filtering (--dry-run)"
+
+# Enforcement is the network layout: in proxy mode the container joins only the
+# internal network, and the proxy env vars point at the sidecar's static IP.
+check_not_contains "egress open is the default" "--network" -- "$BCLAUDE" --dry-run
+check_contains "--egress proxy joins the internal network" \
+    "--network bclaude-internal" -- "$BCLAUDE" --egress proxy --dry-run
+check_contains "--egress proxy points HTTPS_PROXY at the sidecar" \
+    "HTTPS_PROXY=http://10.199.0.2:3128" -- "$BCLAUDE" --egress proxy --dry-run
+check_contains "--egress proxy sets the lowercase form too" \
+    "https_proxy=http://10.199.0.2:3128" -- "$BCLAUDE" --egress proxy --dry-run
+check_contains "--egress proxy keeps loopback unproxied" "NO_PROXY=localhost" -- \
+    "$BCLAUDE" --egress proxy --dry-run
+check_contains "BCLAUDE_EGRESS=proxy works as well" "--network bclaude-internal" -- \
+    env BCLAUDE_EGRESS=proxy "$BCLAUDE" --dry-run
+check_contains "the subnet is overridable" "HTTPS_PROXY=http://10.42.0.2:3128" -- \
+    env BCLAUDE_EGRESS_SUBNET=10.42.0.0/24 "$BCLAUDE" --egress proxy --dry-run
+check_status "an unknown egress mode is refused" 1 -- "$BCLAUDE" --egress nftables --dry-run
+check_contains "hardening stays on in proxy mode" "--cap-drop=ALL" -- \
+    "$BCLAUDE" --egress proxy --dry-run
+check_contains "proxy mode warns about git over ssh" "git over SSH" -- \
+    "$BCLAUDE" --egress proxy --dry-run
+check_contains "help documents --egress" "--egress" -- "$BCLAUDE" help
+check_contains "help documents the egress command" "egress [SUB]" -- "$BCLAUDE" help
+
+# The embedded squid config: deny by default, allowlist file, stdout audit log.
+check_contains "squid config denies by default" "http_access deny all" -- \
+    "$BCLAUDE" show squid-conf
+check_contains "squid config reads the allowlist" "/etc/squid/bclaude-allowlist" -- \
+    "$BCLAUDE" show squid-conf
+check_contains "squid config logs each request to stdout" "stdio:/dev/stdout" -- \
+    "$BCLAUDE" show squid-conf
+check_contains "squid config only serves the internal subnet" "10.199.0.0/24" -- \
+    "$BCLAUDE" show squid-conf
+check_contains "squid config never caches" "cache deny all" -- "$BCLAUDE" show squid-conf
+
+# The default allowlist covers what Claude Code itself needs.
+check_contains "default allowlist has the API host" "api.anthropic.com" -- \
+    "$BCLAUDE" show allowlist
+check_contains "default allowlist covers claude.ai login" "claude.ai" -- \
+    "$BCLAUDE" show allowlist
+check_contains "default allowlist covers the oauth host" "platform.claude.com" -- \
+    "$BCLAUDE" show allowlist
+check_contains "default allowlist explains the syntax" "dstdomain" -- \
+    "$BCLAUDE" show allowlist
+
+section "devcontainer"
+
+dcdir="$(mktemp -d)"
+check_status "devcontainer writes the file" 0 -- "$BCLAUDE" -w "$dcdir" devcontainer
+check_status "the file exists and is not empty" 0 -- \
+    test -s "$dcdir/.devcontainer/devcontainer.json"
+check_contains "devcontainer uses the bclaude image" "localhost/bclaude-test:latest" -- \
+    cat "$dcdir/.devcontainer/devcontainer.json"
+check_contains "devcontainer mounts the config volume" \
+    "source=bclaude-test-config,target=/home/claude/.claude,type=volume" -- \
+    cat "$dcdir/.devcontainer/devcontainer.json"
+check_contains "devcontainer mounts the auth volume" \
+    "source=bclaude-test-auth,target=/home/claude/.claude-auth,type=volume" -- \
+    cat "$dcdir/.devcontainer/devcontainer.json"
+check_contains "devcontainer keeps the hardening" '"--cap-drop=ALL"' -- \
+    cat "$dcdir/.devcontainer/devcontainer.json"
+check_contains "devcontainer keeps the userns mapping" "keep-id:uid=1000,gid=1000" -- \
+    cat "$dcdir/.devcontainer/devcontainer.json"
+check_contains "devcontainer mounts the workspace at /work" "target=/work,type=bind" -- \
+    cat "$dcdir/.devcontainer/devcontainer.json"
+check_not_contains "no proxy plumbing without --egress proxy" "HTTPS_PROXY" -- \
+    cat "$dcdir/.devcontainer/devcontainer.json"
+check_status "an existing file is not overwritten" 1 -- "$BCLAUDE" -w "$dcdir" devcontainer
+check_status "--force overwrites it" 0 -- "$BCLAUDE" -w "$dcdir" devcontainer --force
+"$BCLAUDE" -w "$dcdir" --egress proxy devcontainer --force >/dev/null 2>&1
+check_contains "--egress proxy joins the internal network in the devcontainer" \
+    '"--network=bclaude-internal"' -- cat "$dcdir/.devcontainer/devcontainer.json"
+check_contains "--egress proxy sets the proxy env in the devcontainer" \
+    '"HTTPS_PROXY"' -- cat "$dcdir/.devcontainer/devcontainer.json"
+if command -v python3 >/dev/null 2>&1; then
+    check_status "the generated file is valid json once comments are stripped" 0 -- \
+        bash -c "sed 's|^\s*//.*||' '$dcdir/.devcontainer/devcontainer.json' \
+                 | python3 -c 'import json,sys; json.load(sys.stdin)'"
+else
+    printf '  skip json validation (python3 not installed)\n'
+fi
+check_contains "help documents devcontainer" "devcontainer" -- "$BCLAUDE" help
+rm -rf "$dcdir"
 
 section "SELinux relabelling (--dry-run)"
 
