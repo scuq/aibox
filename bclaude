@@ -156,9 +156,13 @@ RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_VERSION} \
 
 # .claude is the mountpoint for the config volume and .claude-auth for the
 # shared login volume; creating them here owned by claude means podman's volume
-# copy-up gets the ownership right.
-RUN mkdir -p /work /home/claude/.claude /home/claude/.claude-auth /home/claude/.npm-global \
-    && chown -R claude:claude /work /home/claude \
+# copy-up gets the ownership right. /vscode is where the Dev Containers
+# extension auto-mounts its server volume — without a claude-owned mountpoint
+# baked in, podman creates it root-owned and the server install dies on
+# "mkdir /vscode/vscode-server: Permission denied" (cap-drop=ALL means nothing
+# in the container can chown it later).
+RUN mkdir -p /work /vscode /home/claude/.claude /home/claude/.claude-auth /home/claude/.npm-global \
+    && chown -R claude:claude /work /vscode /home/claude \
     && chmod 700 /home/claude/.claude /home/claude/.claude-auth
 
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh

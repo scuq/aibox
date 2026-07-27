@@ -94,6 +94,8 @@ check_contains "embedded containerfile has a FROM" "FROM docker.io/library/node"
     "$BCLAUDE" show containerfile
 check_contains "embedded containerfile copies the entrypoint" "COPY entrypoint.sh" -- \
     "$BCLAUDE" show containerfile
+check_contains "embedded containerfile pre-owns /vscode for dev containers" \
+    "/vscode" -- "$BCLAUDE" show containerfile
 check_status "script is self-contained (no Containerfile/entrypoint.sh needed)" 0 -- \
     bash -c "cd / && \"$BCLAUDE\" --workspace / --dry-run show containerfile"
 
