@@ -218,6 +218,12 @@ check_not_contains "no proxy plumbing without --egress proxy" "HTTPS_PROXY" -- \
     cat "$dcdir/.devcontainer/devcontainer.json"
 check_status "an existing file is not overwritten" 1 -- "$BCLAUDE" -w "$dcdir" devcontainer
 check_status "--force overwrites it" 0 -- "$BCLAUDE" -w "$dcdir" devcontainer --force
+# Options after the command would be silently ignored — refuse them instead,
+# and say where they belong.
+check_status "trailing options are refused" 1 -- \
+    "$BCLAUDE" -w "$dcdir" devcontainer --egress proxy
+check_contains "the refusal says where options go" "before the command" -- \
+    "$BCLAUDE" -w "$dcdir" devcontainer --egress proxy
 "$BCLAUDE" -w "$dcdir" --egress proxy devcontainer --force >/dev/null 2>&1
 check_contains "--egress proxy joins the internal network in the devcontainer" \
     '"--network=bclaude-internal"' -- cat "$dcdir/.devcontainer/devcontainer.json"

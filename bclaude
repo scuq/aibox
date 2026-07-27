@@ -1202,11 +1202,21 @@ do_devcontainer() {
     resolve_volume
     validate_egress
 
+    # Options come before the command; catching them here beats silently
+    # writing a file that ignores what the caller asked for.
+    local force=""
+    case "${1:-}" in
+        "")       ;;
+        --force)  force=1 ;;
+        -*) die "bclaude options go before the command: bclaude ${1:-} ... devcontainer" ;;
+        *)  die "devcontainer takes no argument except --force" ;;
+    esac
+
     if [ -n "$DRY_RUN" ]; then devcontainer_text; return 0; fi
 
     local dir="$WORKSPACE/.devcontainer" file
     file="$dir/devcontainer.json"
-    if [ -e "$file" ] && [ "${1:-}" != "--force" ]; then
+    if [ -e "$file" ] && [ -z "$force" ]; then
         die "$file already exists — pass --force to overwrite it"
     fi
     mkdir -p "$dir"
