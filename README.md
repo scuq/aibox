@@ -5,6 +5,10 @@
 Run the [Claude Code](https://claude.com/claude-code) CLI inside a rootless
 podman container. It sees one directory of yours and nothing else.
 
+The image is a working dev environment — Go, Python and Node toolchains — so
+what Claude writes it can also build, run and test, in the container rather than
+on your machine. Same image in VS Code via `bclaude devcontainer`.
+
 Everything is in a single script — the Containerfile and the container
 entrypoint are embedded in it, so one download is the whole install.
 
@@ -66,7 +70,7 @@ bclaude clean --all                 # remove image + every config volume + the l
 | `install [DIR]` | Copy `bclaude` onto your PATH (default `~/.local/bin`); also works piped from curl |
 | `egress [SUB]` | Egress proxy control: `status`, `denied`, `allow <domain..>`, `log [-f]`, `start`, `reload`, `stop` (see [Egress filtering](#egress-filtering---egress-proxy)) |
 | `devcontainer` | Write `.devcontainer/devcontainer.json` so VS Code attaches into the same image, volumes and hardening (see [VS Code](#vs-code-devcontainer)) |
-| `clean [--all]` | Remove the image, egress proxy and networks; `--all` also offers to drop every config volume and the login |
+| `clean [--all]` | Remove the image, egress proxy and networks; `--all` also offers to drop every config volume and the login, and removes the cache volume |
 | `clean --list` | List the auth volume and the config volumes, with the project each belongs to |
 | `clean --prune` | Drop per-project volumes whose project directory is gone (`--yes` to skip the prompt) |
 | `show <part>` | Print an embedded file: `containerfile`, `entrypoint`, `squid-conf`, `allowlist` |
@@ -91,6 +95,7 @@ volume, auth volume and image: bare `WORKSPACE`, `VOLUME`, `AUTH_VOLUME` and
 | `-V, --volume NAME` | `BCLAUDE_VOLUME` | `bclaude-config` | Named volume for `~/.claude` (sessions, settings; not the login) |
 | `--volume-per-project` | `BCLAUDE_VOLUME_PER_PROJECT=1` | off | A config volume per workspace (see [Config volumes](#config-volumes)) |
 | `--auth-volume NAME` | `BCLAUDE_AUTH_VOLUME` | `bclaude-auth` | Volume holding the login, shared by every project |
+| `--cache-volume NAME` | `BCLAUDE_CACHE_VOLUME` | `bclaude-cache` | Volume holding `~/.cache` — Go modules, pip/uv wheels, npm (see [Toolchains](#toolchains)) |
 | `-i, --image REF` | `BCLAUDE_IMAGE` | `localhost/bclaude:latest` | Image to run |
 | `--claude-version V` | `CLAUDE_VERSION` | `latest` | Claude Code npm version baked into the image |
 | `--memory SIZE` / `--cpus N` | `MEMORY` / `CPUS` | `4g` / `2` | Resource caps; `none` or `--no-limits` disables |
@@ -126,6 +131,9 @@ volume, auth volume and image: bare `WORKSPACE`, `VOLUME`, `AUTH_VOLUME` and
 - **Config** — lives in the `bclaude-config` volume, separate from your host
   `~/.claude`. The login is not in there; it sits in its own `bclaude-auth`
   volume that every project shares.
+- **Caches** — `~/.cache` is the `bclaude-cache` volume, also shared: the Go
+  module and build caches, pip/uv wheels and npm's cache outlive a `--rm` run
+  (see [Toolchains](#toolchains)).
 - **Network** — default rootless (pasta), unrestricted outbound: needed for
   npm/pip/git and the API. `--egress proxy` swaps that for an internal network
   whose only way out is an allowlisting squid sidecar — see
@@ -141,11 +149,13 @@ volume, auth volume and image: bare `WORKSPACE`, `VOLUME`, `AUTH_VOLUME` and
 
 ## Config volumes
 
-There are two volumes, and the split is the point:
+There are three volumes, and the split is the point:
 
 - **`bclaude-auth`** holds nothing but the login, and every project shares it.
 - **`bclaude-config`** holds the rest of `~/.claude` — sessions, project
   settings, MCP servers, plugins.
+- **`bclaude-cache`** holds `~/.cache`: toolchain caches, nothing of yours.
+  Shared as well, and covered under [Toolchains](#toolchains).
 
 By default every project shares that one config volume too, so what you did in
 one repo is visible in the next. `--volume-per-project` gives each workspace its
@@ -169,7 +179,8 @@ running several at once won't put a spent token over a live one.
 
 Volumes bclaude creates are labelled, which is how `--list` and `--prune` know
 what they're looking at. `--prune` only ever considers per-project volumes whose
-recorded project directory is gone — never the shared config or auth volume.
+recorded project directory is gone — never the shared config, auth or cache
+volume.
 
 Isolation caveat: separate config volumes separate *state*, not trust. Every
 project's container mounts the same auth volume, so anything that runs in one
@@ -199,6 +210,39 @@ read (same as on your host); and with `--seed-creds` host and container hold
 independent copies of the refresh token, so a rotation may force one side to
 re-auth. **If untrusted code ran in the container, rotate by re-logging in on
 the host.**
+
+## Toolchains
+
+The image is not just a Claude Code runtime — it is a dev environment, so
+Claude can build and test what it writes instead of handing you code it never
+ran:
+
+| | What's in the image |
+| --- | --- |
+| **Go** | the upstream toolchain in `/usr/local/go` (pinned to a version and its SHA-256), plus `gopls`, `dlv`, `staticcheck`, `goimports` |
+| **Python** | the system `python3` with headers and a compiler, so native extensions build; `uv`, `ruff`, `mypy`, `pytest` and `ipython` in a venv of their own, on `PATH` but unable to collide with a project's dependencies |
+| **Node** | the base image's node 22 and npm |
+
+Everything a build downloads lands in `~/.cache`, which is the shared
+`bclaude-cache` volume — so a second run doesn't refetch the module cache and
+the wheels. Nothing in it is precious, which is why `bclaude clean --all` drops
+it without a prompt while it asks about sessions and the login.
+
+Notes:
+
+- **`pip install` works.** Debian's PEP 668 "externally managed" marker is
+  removed from the image, so `pip install --user` behaves; `~/.local/bin` is on
+  `PATH`. Those installs are in the container layer, so they vanish with `--rm` —
+  a project venv (or `uv`) is what survives, because the workspace does.
+- **A `go.mod` that wants a newer toolchain** gets one at run time through the
+  module proxy, verified against the checksum database and cached in the volume.
+- **Bigger builds want more room** than the 4g/2cpu default:
+  `bclaude --memory 8g --cpus 4`.
+- **Under `--egress proxy`**, `proxy.golang.org`, `sum.golang.org`, `pypi.org`
+  and `files.pythonhosted.org` are in the default allowlist. Anything else a
+  build reaches for needs `bclaude egress allow <domain>`.
+- The toolchains cost image size (a couple of GB) and build time. To trim them,
+  edit the embedded Containerfile (`bclaude show containerfile`) and rebuild.
 
 ## Installing packages (`--allow-pkg`)
 
@@ -281,6 +325,13 @@ behave identically — diffs and selection context included, because everything
 shares the container's loopback. Requires the Dev Containers extension with
 `"dev.containers.dockerPath": "podman"`.
 
+It also brings the Go and Python extensions and points them at the
+[toolchains](#toolchains) already in the image — `go.goroot`, the baked-in
+`gopls`/`dlv`/`staticcheck`, the interpreter — with the Go extension's own tool
+bootstrap turned off, since that wants a module proxy `--egress proxy` may not
+be allowing. The `bclaude-cache` volume is mounted too, so the module cache is
+the same one the CLI uses.
+
 It honours the current flags: `bclaude --volume-per-project devcontainer`
 pins this repo's config volume, and `bclaude --egress proxy devcontainer`
 puts the whole IDE session behind the egress allowlist (run
@@ -310,8 +361,9 @@ tests/run-tests.sh           # also builds the image and runs the container
 
 Safe to run on a machine you actually use bclaude on: the suite clears every
 `BCLAUDE_*` variable from your environment and works only on
-`localhost/bclaude-test:latest`, `bclaude-test-config` and `bclaude-test-auth`,
-which it removes when it finishes (`BCLAUDE_KEEP=1` keeps them). It never reads
+`localhost/bclaude-test:latest`, `bclaude-test-config`, `bclaude-test-auth` and
+`bclaude-test-cache`, which it removes when it finishes (`BCLAUDE_KEEP=1` keeps
+them). It never reads
 your host credentials and never writes outside those volumes, `tests/` and
 `mktemp` directories. The full run does build an image (a few minutes, needs
 network) and start containers.

@@ -17,7 +17,7 @@ FAST=""
 # removes volumes and the image at the end — at whatever the caller happens to
 # have exported. The rest are cleared because they change what the dry-run
 # assertions expect, or would leak a real token into a test container.
-unset BCLAUDE_WORKSPACE BCLAUDE_VOLUME BCLAUDE_AUTH_VOLUME BCLAUDE_IMAGE \
+unset BCLAUDE_WORKSPACE BCLAUDE_VOLUME BCLAUDE_AUTH_VOLUME BCLAUDE_CACHE_VOLUME BCLAUDE_IMAGE \
       BCLAUDE_VOLUME_PER_PROJECT BCLAUDE_RO BCLAUDE_AUTOBUILD BCLAUDE_GIT_CONFIG \
       BCLAUDE_ALLOW_ROOT WORKSPACE VOLUME AUTH_VOLUME IMAGE CLAUDE_VERSION \
       MEMORY CPUS TMPFS_SIZE ALLOW_PKG SEED_CONFIG SEED_CREDS HOST_CREDS \
@@ -26,6 +26,7 @@ unset BCLAUDE_WORKSPACE BCLAUDE_VOLUME BCLAUDE_AUTH_VOLUME BCLAUDE_IMAGE \
 export BCLAUDE_IMAGE=localhost/bclaude-test:latest
 export BCLAUDE_VOLUME=bclaude-test-config
 export BCLAUDE_AUTH_VOLUME=bclaude-test-auth
+export BCLAUDE_CACHE_VOLUME=bclaude-test-cache
 export HOST_CREDS=/nonexistent/.credentials.json
 
 # Belt and braces for the cleanup: only ever remove things named like ours.
@@ -96,6 +97,18 @@ check_contains "embedded containerfile copies the entrypoint" "COPY entrypoint.s
     "$BCLAUDE" show containerfile
 check_contains "embedded containerfile pre-owns /vscode for dev containers" \
     "/vscode" -- "$BCLAUDE" show containerfile
+check_contains "embedded containerfile installs a Go toolchain" "/usr/local/go/bin/go version" -- \
+    "$BCLAUDE" show containerfile
+check_contains "the Go tarball is checksum-verified" "sha256sum -c -" -- \
+    "$BCLAUDE" show containerfile
+check_contains "the Go extension's tools are baked in" "gopls@latest" -- \
+    "$BCLAUDE" show containerfile
+check_contains "embedded containerfile installs the python build deps" "python3-dev" -- \
+    "$BCLAUDE" show containerfile
+check_contains "python tooling lives in its own venv" "/opt/pytools" -- \
+    "$BCLAUDE" show containerfile
+check_contains "login shells keep the toolchain PATH" "/etc/profile.d/10-bclaude-path.sh" -- \
+    "$BCLAUDE" show containerfile
 check_status "script is self-contained (no Containerfile/entrypoint.sh needed)" 0 -- \
     bash -c "cd / && \"$BCLAUDE\" --workspace / --dry-run show containerfile"
 
@@ -210,7 +223,22 @@ check_contains "devcontainer mounts the config volume" \
 check_contains "devcontainer mounts the auth volume" \
     "source=bclaude-test-auth,target=/home/claude/.claude-auth,type=volume" -- \
     cat "$dcdir/.devcontainer/devcontainer.json"
+check_contains "devcontainer mounts the cache volume" \
+    "source=bclaude-test-cache,target=/home/claude/.cache,type=volume" -- \
+    cat "$dcdir/.devcontainer/devcontainer.json"
 check_contains "devcontainer keeps the hardening" '"--cap-drop=ALL"' -- \
+    cat "$dcdir/.devcontainer/devcontainer.json"
+check_contains "devcontainer brings the go extension" '"golang.go"' -- \
+    cat "$dcdir/.devcontainer/devcontainer.json"
+check_contains "devcontainer brings the python extension" '"ms-python.python"' -- \
+    cat "$dcdir/.devcontainer/devcontainer.json"
+check_contains "devcontainer points the go extension at the image toolchain" \
+    '"go.goroot": "/usr/local/go"' -- cat "$dcdir/.devcontainer/devcontainer.json"
+check_contains "devcontainer stops the go extension installing its own tools" \
+    '"go.toolsManagement.autoUpdate": false' -- \
+    cat "$dcdir/.devcontainer/devcontainer.json"
+check_contains "devcontainer names the python interpreter" \
+    '"python.defaultInterpreterPath": "/usr/bin/python3"' -- \
     cat "$dcdir/.devcontainer/devcontainer.json"
 check_contains "devcontainer keeps the userns mapping" "keep-id:uid=1000,gid=1000" -- \
     cat "$dcdir/.devcontainer/devcontainer.json"
@@ -346,6 +374,23 @@ check_contains "per-project volumes keep the shared auth volume" \
 check_contains "status reports the auth volume" "auth      : bclaude-test-auth" -- \
     "$BCLAUDE" status
 check_contains "help documents --auth-volume" "--auth-volume" -- "$BCLAUDE" help
+
+section "shared cache volume"
+
+# The toolchain caches (Go modules, pip/uv wheels, npm) survive --rm because
+# they live in a volume of their own, shared by every project.
+check_contains "the cache volume is mounted" "bclaude-test-cache:/home/claude/.cache" -- \
+    "$BCLAUDE" --dry-run
+check_contains "--cache-volume is honoured" "mycache:/home/claude/.cache" -- \
+    "$BCLAUDE" --cache-volume mycache --dry-run
+check_contains "per-project volumes keep the shared cache volume" \
+    "bclaude-test-cache:/home/claude/.cache" -- \
+    env -u BCLAUDE_VOLUME "$BCLAUDE" --volume-per-project --dry-run
+check_contains "status reports the cache volume" "cache     : bclaude-test-cache" -- \
+    "$BCLAUDE" status
+check_contains "help documents --cache-volume" "--cache-volume" -- "$BCLAUDE" help
+check_contains "the image puts the go path inside the cache" \
+    "GOPATH=/home/claude/.cache/go" -- "$BCLAUDE" show containerfile
 
 # The entrypoint carries the login between the two volumes.
 check_contains "the entrypoint copies the login in from the auth volume" \
@@ -662,6 +707,31 @@ else
             podman run --rm "$BCLAUDE_IMAGE" --version
         check_contains "config dir is the mounted volume" "/home/claude/.claude" -- \
             "$BCLAUDE" shell -c 'echo $CLAUDE_CONFIG_DIR'
+
+        # The toolchains, in a login shell: /etc/profile hands non-root users a
+        # fixed PATH, so this is where a missing profile.d drop-in would show up.
+        check_contains "the go toolchain is in the image" "go version go1." -- \
+            podman run --rm --entrypoint bash "$BCLAUDE_IMAGE" -lc 'go version'
+        check_contains "the go tools are in the image" "gopls dlv staticcheck goimports" -- \
+            podman run --rm --entrypoint bash "$BCLAUDE_IMAGE" -lc \
+            'for t in gopls dlv staticcheck goimports; do command -v $t >/dev/null && printf "%s " $t; done | sed "s/ $//"'
+        check_contains "python and its tooling are in the image" "python3 pip uv ruff mypy pytest" -- \
+            podman run --rm --entrypoint bash "$BCLAUDE_IMAGE" -lc \
+            'for t in python3 pip uv ruff mypy pytest; do command -v $t >/dev/null && printf "%s " $t; done | sed "s/ $//"'
+        # A compiler and the python headers, which is what a pip install of
+        # anything with a native extension needs.
+        check_status "python can build a native extension" 0 -- \
+            "$BCLAUDE" shell -c 'test -f "$(python3 -c "import sysconfig;print(sysconfig.get_paths()[\"include\"])")/Python.h" && command -v cc'
+        # Under the default hardening, in the workspace, with the caches on the
+        # volume — the same posture Claude gets.
+        check_contains "go builds and runs under the hardened runtime" "go-build-ok" -- \
+            "$BCLAUDE" shell -c 'cd /tmp && mkdir -p b && cd b
+                printf "package main\nimport \"fmt\"\nfunc main(){fmt.Println(\"go-build-ok\")}\n" > main.go
+                go mod init b >/dev/null 2>&1 && go build -o b . && ./b'
+        check_contains "the go build cache lands in the cache volume" "/home/claude/.cache" -- \
+            "$BCLAUDE" shell -c 'go env GOCACHE GOMODCACHE'
+        check_status "a virtualenv works" 0 -- \
+            "$BCLAUDE" shell -c 'python3 -m venv /tmp/venv && /tmp/venv/bin/python -c "import sys"'
         check_status "run exits cleanly through the wrapper" 0 -- \
             "$BCLAUDE" shell -c 'true'
         # The entrypoint runs claude as a child now instead of exec'ing it, so
@@ -709,10 +779,12 @@ else
     fi
 
     if [ -n "${BCLAUDE_KEEP:-}" ]; then
-        printf '  .... keeping %s, %s and %s (BCLAUDE_KEEP set)\n' "$BCLAUDE_IMAGE" "$BCLAUDE_VOLUME" "$BCLAUDE_AUTH_VOLUME"
+        printf '  .... keeping %s, %s, %s and %s (BCLAUDE_KEEP set)\n' \
+            "$BCLAUDE_IMAGE" "$BCLAUDE_VOLUME" "$BCLAUDE_AUTH_VOLUME" "$BCLAUDE_CACHE_VOLUME"
     else
         rm_test_volume "$BCLAUDE_VOLUME"
         rm_test_volume "$BCLAUDE_AUTH_VOLUME"
+        rm_test_volume "$BCLAUDE_CACHE_VOLUME"
         rm_test_image  "$BCLAUDE_IMAGE"
     fi
 fi
