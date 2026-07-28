@@ -9,6 +9,8 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BCLAUDE="${BCLAUDE:-$HERE/../bclaude}"
+# Absolute, for the assertions about paths bclaude writes into files it emits.
+BCLAUDE_ABS="$(cd "$(dirname "$BCLAUDE")" && pwd)/$(basename "$BCLAUDE")"
 FAST=""
 [ "${1:-}" = "--fast" ] && FAST=1
 
@@ -242,6 +244,10 @@ check_contains "devcontainer names the python interpreter" \
     cat "$dcdir/.devcontainer/devcontainer.json"
 check_contains "devcontainer keeps the userns mapping" "keep-id:uid=1000,gid=1000" -- \
     cat "$dcdir/.devcontainer/devcontainer.json"
+# Otherwise VS Code derives a vsc-<project>-<hash>-uid image of its own, which
+# both duplicates the keep-id mapping and hides `bclaude build` behind a cache.
+check_contains "devcontainer does not let VS Code re-derive the image" \
+    '"updateRemoteUserUID": false' -- cat "$dcdir/.devcontainer/devcontainer.json"
 check_contains "devcontainer mounts the workspace at /work" "target=/work,type=bind" -- \
     cat "$dcdir/.devcontainer/devcontainer.json"
 check_not_contains "no proxy plumbing without --egress proxy" "HTTPS_PROXY" -- \
@@ -267,6 +273,41 @@ else
     printf '  skip json validation (python3 not installed)\n'
 fi
 check_contains "help documents devcontainer" "devcontainer" -- "$BCLAUDE" help
+
+# --fresh: nothing between `bclaude build` and what VS Code starts. The image is
+# rebuilt on the host before every start, and the container is discarded on stop
+# so the next one comes from that image instead of being revived.
+check_not_contains "no initializeCommand by default" "initializeCommand" -- \
+    "$BCLAUDE" --dry-run devcontainer
+check_not_contains "the container is not disposable by default" '"--rm"' -- \
+    "$BCLAUDE" --dry-run devcontainer
+check_contains "--fresh rebuilds the image before every start" \
+    '"initializeCommand"' -- "$BCLAUDE" --dry-run devcontainer --fresh
+check_contains "--fresh names this script by absolute path" "$BCLAUDE_ABS" -- \
+    "$BCLAUDE" --dry-run devcontainer --fresh
+check_contains "--fresh builds the image the file names" \
+    '"--image", "localhost/bclaude-test:latest", "build"' -- \
+    "$BCLAUDE" --dry-run devcontainer --fresh
+check_contains "--fresh discards the container on stop" '"--rm"' -- \
+    "$BCLAUDE" --dry-run devcontainer --fresh
+check_contains "--fresh keeps the hardening" '"--cap-drop=ALL"' -- \
+    "$BCLAUDE" --dry-run devcontainer --fresh
+check_status "--fresh and --force combine" 0 -- \
+    "$BCLAUDE" -w "$dcdir" devcontainer --fresh --force
+check_status "an unknown devcontainer flag is refused" 1 -- \
+    "$BCLAUDE" -w "$dcdir" devcontainer --nonsense
+# Piped from curl there is no script on disk to name, so --fresh has to refuse
+# rather than write a file whose initializeCommand points at nothing.
+check_status "--fresh refuses when there is no script on disk" 1 -- \
+    bash -c "cat '$BCLAUDE_ABS' | bash -s -- -w '$dcdir' devcontainer --fresh --force"
+check_contains "the refusal says how to fix it" "bclaude install" -- \
+    bash -c "cat '$BCLAUDE_ABS' | bash -s -- -w '$dcdir' devcontainer --fresh --force 2>&1"
+if command -v python3 >/dev/null 2>&1; then
+    "$BCLAUDE" -w "$dcdir" devcontainer --fresh --force >/dev/null 2>&1
+    check_status "--fresh output is valid json too" 0 -- \
+        bash -c "sed 's|^\s*//.*||' '$dcdir/.devcontainer/devcontainer.json' \
+                 | python3 -c 'import json,sys; json.load(sys.stdin)'"
+fi
 rm -rf "$dcdir"
 
 section "SELinux relabelling (--dry-run)"

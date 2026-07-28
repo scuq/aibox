@@ -65,6 +65,7 @@ ALLOWLIST="${BCLAUDE_ALLOWLIST:-$BCLAUDE_CONFIG_HOME/allowlist}"
 DRY_RUN=""
 FORCE_REBUILD=""
 NO_CACHE=""
+DEVCONTAINER_FRESH=""                        # 1: `devcontainer --fresh` (see do_devcontainer)
 
 # The uid/gid of the claude user in the image. The userns mapping aims the host
 # user at these, so they are the one place that number is written down.
@@ -578,6 +579,10 @@ COMMANDS
                       into the same image, volumes and hardening, with the Go
                       and Python extensions pointed at the toolchains in the
                       image (--force to overwrite; honours --egress proxy)
+                      --fresh adds an initializeCommand that rebuilds the image
+                      before every start, and --rm so the container is recreated
+                      from it rather than revived. Writes this script's absolute
+                      path into the file, so don't commit that version
     clean [--all]     Remove the image, egress proxy and networks; --all also
                       offers every config volume and the login, and drops the
                       cache volume
@@ -686,6 +691,19 @@ EOF_USAGE
 # Preflight checks
 # ---------------------------------------------------------------------------
 have() { command -v "$1" >/dev/null 2>&1; }
+
+# Where this script actually is, absolutely. Empty when there is no file to
+# point at — bclaude piped straight from curl into bash — which both callers
+# have to handle rather than emit a path that isn't there.
+self_path() {
+    local src="${BASH_SOURCE[0]:-}"
+    [ -f "$src" ] || return 0
+    printf '%s/%s\n' "$(cd "$(dirname "$src")" && pwd)" "$(basename "$src")"
+}
+
+# A path we are about to drop inside a JSON string. Backslash first, or it
+# escapes the escapes.
+json_escape() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
 
 podman_ok=""
 require_podman() {
@@ -1261,6 +1279,9 @@ do_run() {
 # and CLI share a loopback, diffs and selection context work, and the egress
 # posture is untouched. This emits a devcontainer.json wired to the same
 # image, volumes and hardening flags as `bclaude` itself.
+#
+# --fresh adds the two lines that stop a stale container standing in for the
+# image you just built: see do_devcontainer.
 devcontainer_text() {
     local relabel=""
     [ -n "$SELINUX_RELABEL" ] && relabel=",z"
@@ -1281,6 +1302,28 @@ devcontainer_text() {
     "overrideCommand": true,
     "containerUser": "claude",
     "remoteUser": "claude",
+    // Off, or Dev Containers derives its own image from this one — the
+    // localhost/vsc-<project>-<hash>-uid you see in \`podman images\` — purely to
+    // rewrite claude's uid to your host uid. The keep-id mapping below already
+    // aims your host user at uid 1000, so that rewrite is at best redundant and
+    // at worst fights it (the volumes are owned by 1000). It is also a second,
+    // cached image between you and \`bclaude build\`: rebuild bclaude's image and
+    // the derived one stays behind until you rebuild the container too.
+    "updateRemoteUserUID": false,
+EOF
+    if [ -n "$DEVCONTAINER_FRESH" ]; then
+        cat <<EOF
+    // --fresh: rebuild the image on the host before every start. Runs during
+    // creation and on subsequent starts, so a bclaude you edited reaches this
+    // project without you remembering to rebuild. Cheap with warm layers, and
+    // it fails the start rather than opening a container built from a recipe
+    // that no longer parses. The absolute path is why this file stops being
+    // portable — regenerate without --fresh before committing it somewhere
+    // bclaude isn't installed.
+    "initializeCommand": ["$(json_escape "$(self_path)")", "--image", "$IMAGE", "build"],
+EOF
+    fi
+    cat <<EOF
     "mounts": [
         "source=$VOLUME,target=/home/claude/.claude,type=volume",
         "source=$AUTH_VOLUME,target=$AUTH_DIR,type=volume",
@@ -1289,6 +1332,19 @@ devcontainer_text() {
     // Same flags as \`bclaude\` (memory/cpu caps are left out: they would fail
     // on hosts without delegated cgroups, and this file may travel).
     "runArgs": [
+EOF
+    if [ -n "$DEVCONTAINER_FRESH" ]; then
+        cat <<EOF
+        // --fresh: the container is thrown away when VS Code stops it, so the
+        // next start creates one from the current image instead of reviving a
+        // snapshot of an older one. What that costs you is anything installed
+        // into the container layer (\`pip install --user\`, --allow-pkg apt
+        // installs); the caches, the config and the VS Code server all live in
+        // volumes and survive.
+        "--rm",
+EOF
+    fi
+    cat <<EOF
         "--userns=keep-id:uid=$CONTAINER_UID,gid=$CONTAINER_GID",
         "--security-opt=no-new-privileges",
         "--cap-drop=ALL",
@@ -1361,15 +1417,24 @@ do_devcontainer() {
     resolve_volume
     validate_egress
 
-    # Options come before the command; catching them here beats silently
-    # writing a file that ignores what the caller asked for.
+    # --force and --fresh are this command's own; every other option belongs
+    # before it. Catching the rest here beats silently writing a file that
+    # ignores what the caller asked for.
     local force=""
-    case "${1:-}" in
-        "")       ;;
-        --force)  force=1 ;;
-        -*) die "bclaude options go before the command: bclaude ${1:-} ... devcontainer" ;;
-        *)  die "devcontainer takes no argument except --force" ;;
-    esac
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --force)  force=1; shift ;;
+            --fresh)  DEVCONTAINER_FRESH=1; shift ;;
+            -*) die "bclaude options go before the command: bclaude $1 ... devcontainer" ;;
+            *)  die "devcontainer takes no arguments except --force and --fresh" ;;
+        esac
+    done
+
+    # --fresh writes the path of this script into the file, so there has to be
+    # one: piped from curl there is nothing to point at.
+    if [ -n "$DEVCONTAINER_FRESH" ] && [ -z "$(self_path)" ]; then
+        die "--fresh needs bclaude on disk to name in initializeCommand — run 'bclaude install' first"
+    fi
 
     if [ -n "$DRY_RUN" ]; then devcontainer_text; return 0; fi
 
@@ -1387,7 +1452,12 @@ do_devcontainer() {
     if [ "$EGRESS" = "proxy" ]; then
         info "egress proxy mode: run 'bclaude egress start' before VS Code opens the container"
     fi
+    if [ -n "$DEVCONTAINER_FRESH" ]; then
+        info "--fresh: every start rebuilds $IMAGE via $(self_path), and the container is discarded on stop"
+        info "--fresh names a host path, so this file is no longer portable — regenerate without it before committing"
+    fi
     info "in VS Code: 'Dev Containers: Reopen in Container' (set dev.containers.dockerPath to podman)"
+    info "an existing container is reused — after changing this file or rebuilding the image, use 'Dev Containers: Rebuild Container'"
 }
 
 # ---------------------------------------------------------------------------
@@ -1539,10 +1609,7 @@ do_status() {
 # In that case the script is fetched from BCLAUDE_URL instead.
 do_install() {
     local dest="${1:-$HOME/.local/bin}"
-    local self="" src="${BASH_SOURCE[0]:-}"
-    if [ -f "$src" ]; then
-        self="$(cd "$(dirname "$src")" && pwd)/$(basename "$src")"
-    fi
+    local self; self="$(self_path)"
 
     mkdir -p "$dest" || die "could not create $dest"
 

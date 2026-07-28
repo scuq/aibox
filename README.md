@@ -69,7 +69,7 @@ bclaude clean --all                 # remove image + every config volume + the l
 | `status` | Image, volumes, credential and workspace state |
 | `install [DIR]` | Copy `bclaude` onto your PATH (default `~/.local/bin`); also works piped from curl |
 | `egress [SUB]` | Egress proxy control: `status`, `denied`, `allow <domain..>`, `log [-f]`, `start`, `reload`, `stop` (see [Egress filtering](#egress-filtering---egress-proxy)) |
-| `devcontainer` | Write `.devcontainer/devcontainer.json` so VS Code attaches into the same image, volumes and hardening (see [VS Code](#vs-code-devcontainer)) |
+| `devcontainer` | Write `.devcontainer/devcontainer.json` so VS Code attaches into the same image, volumes and hardening; `--fresh` rebuilds the image and recreates the container on every start (see [VS Code](#vs-code-devcontainer)) |
 | `clean [--all]` | Remove the image, egress proxy and networks; `--all` also offers to drop every config volume and the login, and removes the cache volume |
 | `clean --list` | List the auth volume and the config volumes, with the project each belongs to |
 | `clean --prune` | Drop per-project volumes whose project directory is gone (`--yes` to skip the prompt) |
@@ -331,6 +331,36 @@ It also brings the Go and Python extensions and points them at the
 bootstrap turned off, since that wants a module proxy `--egress proxy` may not
 be allowing. The `bclaude-cache` volume is mounted too, so the module cache is
 the same one the CLI uses.
+
+### Keeping it from going stale
+
+VS Code reuses the container it already has, so `bclaude build` alone doesn't
+reach a project that's been opened before — you need **Dev Containers: Rebuild
+Container**. `--fresh` removes that step:
+
+```bash
+bclaude devcontainer --fresh --force
+```
+
+It adds two things: an `initializeCommand` that runs `bclaude build` **on the
+host** before every start (the spec runs it on creation *and* subsequent
+starts), and `--rm`, so the container is discarded when VS Code stops it and the
+next start creates one from the image that was just rebuilt. Anything installed
+into the container layer (`pip install --user`, `--allow-pkg` apt installs) goes
+with it; the caches, your config and the VS Code server are all in volumes and
+survive.
+
+The file names the absolute path of the script that generated it, so a `--fresh`
+file is local to your machine — regenerate without it before committing one to a
+shared repo. Piped from curl there is no path to name, and `--fresh` refuses
+rather than write a broken file.
+
+The other half of the staleness problem is already handled: the generated file
+sets `"updateRemoteUserUID": false`, which stops the extension deriving its own
+`localhost/vsc-<project>-<hash>-uid` image from bclaude's. That derivation
+exists only to rewrite the container user's UID, which `--userns=keep-id` has
+already done — and it was a second cached image sitting between `bclaude build`
+and what actually ran.
 
 It honours the current flags: `bclaude --volume-per-project devcontainer`
 pins this repo's config volume, and `bclaude --egress proxy devcontainer`
