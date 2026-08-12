@@ -1,0 +1,9 @@
+# The built binary (use `make build`) and release artefacts.
+/aibox
+/dist/
+
+# Handoff artefacts written by the agent inside a container.
+.aibox/
+
+# Local Claude Code settings (per-machine permission grants).
+.claude/settings.local.json

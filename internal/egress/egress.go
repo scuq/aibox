@@ -1,0 +1,250 @@
+// Package egress owns the network, the squid sidecar, the ACL composition and
+// the audit log. Enforcement is the network layout, not the env vars: in
+// proxy mode the container joins only an --internal network, which has no
+// route off-host and no external DNS, so there is nothing to reach except the
+// squid sidecar, which sits on both that network and an ordinary one.
+// HTTPS_PROXY et al. are set only so tools know where the one door is. This
+// also closes DNS exfiltration — the container cannot resolve external names;
+// squid does all resolution on the outside leg.
+package egress
+
+import (
+	"fmt"
+	"net"
+	"os"
+	"path/filepath"
+	"strings"
+	"text/template"
+
+	"github.com/scuq/aibox/assets"
+)
+
+// Fixed names for the egress plumbing.
+const (
+	NetInternal = "aibox-internal" // the workspace container's only network in proxy mode
+	NetEgress   = "aibox-egress"   // the sidecars' way out; the workload is never on it
+	ProxyName   = "aibox-proxy"
+	ProxyPort   = 3128
+	// AllowlistContainerPath is where the composed allowlist is mounted in the
+	// sidecar.
+	AllowlistContainerPath = "/etc/squid/aibox-allowlist"
+)
+
+// ProxyIP derives the sidecar's fixed address: host .2 of the internal
+// subnet. Derived arithmetically — *not* resolved by container name — because
+// container-name resolution on internal networks varies across podman
+// versions. (.1 is the gateway.)
+func ProxyIP(subnet string) (string, error) {
+	ip, _, err := net.ParseCIDR(subnet)
+	if err != nil {
+		return "", fmt.Errorf("invalid egress subnet %q: %w", subnet, err)
+	}
+	v4 := ip.To4()
+	if v4 == nil {
+		return "", fmt.Errorf("egress subnet %q is not IPv4", subnet)
+	}
+	v4[3] = 2
+	return v4.String(), nil
+}
+
+// ProxyURL is what HTTPS_PROXY et al. are set to.
+func ProxyURL(subnet string) (string, error) {
+	ip, err := ProxyIP(subnet)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("http://%s:%d", ip, ProxyPort), nil
+}
+
+// NoProxy keeps loopback unproxied.
+const NoProxy = "localhost,127.0.0.1,::1"
+
+// SquidConf renders the sidecar configuration.
+func SquidConf(subnet string) (string, error) {
+	tmpl, err := template.New("squid").Parse(string(assets.Read("squid.conf.tmpl")))
+	if err != nil {
+		return "", err
+	}
+	var b strings.Builder
+	err = tmpl.Execute(&b, map[string]any{
+		"Port":          ProxyPort,
+		"ProxyName":     ProxyName,
+		"Subnet":        subnet,
+		"AllowlistPath": AllowlistContainerPath,
+	})
+	return b.String(), err
+}
+
+// ConfigDir is where the ACL fragments and generated files live on the host.
+func ConfigDir() string {
+	base := os.Getenv("XDG_CONFIG_HOME")
+	if base == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return ""
+		}
+		base = filepath.Join(home, ".config")
+	}
+	return filepath.Join(base, "aibox", "egress")
+}
+
+// FragmentPath is a named ACL fragment file (base.acl, claude.acl, …).
+func FragmentPath(name string) string {
+	return filepath.Join(ConfigDir(), name+".acl")
+}
+
+// GeneratedPath is the composed allowlist squid actually reads. Never edited
+// by hand — it is overwritten on every reload.
+func GeneratedPath() string { return filepath.Join(ConfigDir(), "generated.acl") }
+
+// SquidConfPath is the rendered squid.conf on the host.
+func SquidConfPath() string { return filepath.Join(ConfigDir(), "squid.conf") }
+
+// ValidateDomain accepts the user-facing domain syntax: "example.com" for the
+// exact host, ".example.com" for the domain and every subdomain (squid's
+// dstdomain semantics, which nobody should need to know).
+func ValidateDomain(d string) error {
+	if d == "" {
+		return fmt.Errorf("empty domain")
+	}
+	for _, r := range d {
+		if !(r == '.' || r == '-' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')) {
+			return fmt.Errorf("%q does not look like a domain", d)
+		}
+	}
+	return nil
+}
+
+// EnsureFragments writes the embedded default fragments for any that do not
+// exist yet, so the first proxy run seeds an editable configuration. Existing
+// files are never touched: they may carry hand-tuned entries.
+func EnsureFragments(enabledAssistants []string) error {
+	if err := os.MkdirAll(ConfigDir(), 0o755); err != nil {
+		return err
+	}
+	write := func(fragment, asset string) error {
+		path := FragmentPath(fragment)
+		if _, err := os.Stat(path); err == nil {
+			return nil
+		}
+		return os.WriteFile(path, assets.Read(asset), 0o644)
+	}
+	if err := write("base", "allowlists/base.txt"); err != nil {
+		return err
+	}
+	for _, a := range enabledAssistants {
+		switch a {
+		case "claude", "codex":
+			if err := write(a, "allowlists/"+a+".txt"); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// Compose builds the generated allowlist:
+//
+//	base + enabled assistants + project fragment + extra entries
+//	→ normalise → validate → deduplicate
+//
+// Returned as file content; the caller writes it and gates the reload on
+// `squid -k parse`.
+func Compose(enabledAssistants []string, projectID string, extra []string) (string, error) {
+	var b strings.Builder
+	b.WriteString("# Generated by aibox — do not edit. Edit the fragment files in\n")
+	b.WriteString("# " + ConfigDir() + " instead and run 'aibox egress reload'.\n")
+
+	seen := map[string]bool{}
+	appendFile := func(label, path string) error {
+		data, err := os.ReadFile(path)
+		if os.IsNotExist(err) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(&b, "\n# --- %s ---\n", label)
+		for _, line := range strings.Split(string(data), "\n") {
+			entry := strings.TrimSpace(line)
+			if entry == "" || strings.HasPrefix(entry, "#") {
+				continue
+			}
+			if err := ValidateDomain(entry); err != nil {
+				return fmt.Errorf("%s: %w", path, err)
+			}
+			if seen[entry] {
+				continue
+			}
+			seen[entry] = true
+			b.WriteString(entry + "\n")
+		}
+		return nil
+	}
+
+	if err := appendFile("base", FragmentPath("base")); err != nil {
+		return "", err
+	}
+	for _, a := range enabledAssistants {
+		if err := appendFile("assistant: "+a, FragmentPath(a)); err != nil {
+			return "", err
+		}
+	}
+	if projectID != "" {
+		if err := appendFile("project "+projectID, FragmentPath("project-"+projectID)); err != nil {
+			return "", err
+		}
+	}
+	if len(extra) > 0 {
+		b.WriteString("\n# --- command line ---\n")
+		for _, entry := range extra {
+			entry = strings.TrimSpace(entry)
+			if entry == "" {
+				continue
+			}
+			if err := ValidateDomain(entry); err != nil {
+				return "", err
+			}
+			if !seen[entry] {
+				seen[entry] = true
+				b.WriteString(entry + "\n")
+			}
+		}
+	}
+	return b.String(), nil
+}
+
+// Entries counts non-comment, non-blank lines in an allowlist file.
+func Entries(path string) int {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, line := range strings.Split(string(data), "\n") {
+		t := strings.TrimSpace(line)
+		if t != "" && !strings.HasPrefix(t, "#") {
+			n++
+		}
+	}
+	return n
+}
+
+// ParseDenied extracts denied requests from squid's access log, counted by
+// domain — the tuning loop behind `aibox egress denied`.
+func ParseDenied(logs string) map[string]int {
+	counts := map[string]int{}
+	for _, line := range strings.Split(logs, "\n") {
+		fields := strings.Fields(line)
+		// squid native log: time elapsed client action/code size method URL ...
+		if len(fields) < 7 || !strings.Contains(fields[3], "DENIED") {
+			continue
+		}
+		u := fields[6]
+		if i := strings.LastIndex(u, ":"); i > 0 && !strings.Contains(u[i:], "/") {
+			u = u[:i] // strip :port from CONNECT host:port
+		}
+		counts[u]++
+	}
+	return counts
+}

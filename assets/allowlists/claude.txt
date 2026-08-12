@@ -1,0 +1,30 @@
+# aibox egress allowlist fragment: Claude Code. Applied when the claude
+# assistant is enabled. Hosts and their purposes come from
+# https://code.claude.com/docs/en/network-config (checked 2026-07) — comments
+# say what each line is for, so trimming is informed.
+
+# --- Required ---
+# The API itself.
+api.anthropic.com
+# claude.ai account login.
+claude.ai
+# Sign-in opens a claude.com page first; also pre-approved docs lookups.
+claude.com
+# OAuth token exchange/refresh — needed for claude.ai logins too, not just Console.
+platform.claude.com
+
+# --- Optional features (drop what you don't use) ---
+# MCP connectors from claude.ai.
+mcp-proxy.anthropic.com
+# Plugin downloads and update version checks.
+downloads.claude.ai
+# Plugin metadata and artifact uploads.
+storage.googleapis.com
+# Changelog feed for /release-notes.
+raw.githubusercontent.com
+# Docs lookups by the built-in claude-code-guide agent.
+code.claude.com
+
+# --- Telemetry (optional; or set DISABLE_TELEMETRY=1 and drop both) ---
+http-intake.logs.us5.datadoghq.com
+browser-intake-us5-datadoghq.com

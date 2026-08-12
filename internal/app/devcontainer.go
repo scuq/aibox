@@ -1,0 +1,288 @@
+package app
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/scuq/aibox/internal/assistant"
+	"github.com/scuq/aibox/internal/config"
+	"github.com/scuq/aibox/internal/devcontainer"
+	"github.com/scuq/aibox/internal/doctor"
+	"github.com/scuq/aibox/internal/git"
+	"github.com/scuq/aibox/internal/image"
+	"github.com/scuq/aibox/internal/output"
+	"github.com/scuq/aibox/internal/project"
+	"github.com/scuq/aibox/internal/relay"
+	"github.com/scuq/aibox/internal/runtime"
+)
+
+func cmdDevcontainer(ctx context.Context, p *output.Printer, rt *runtime.Podman, args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("devcontainer needs a subcommand: create | list | status | stop | remove | recreate")
+	}
+	sub := args[0]
+	args = args[1:]
+	switch sub {
+	case "create":
+		return devcontainerCreate(p, args)
+	case "here":
+		return devcontainerHere(p, args)
+	case "list", "status", "stop", "remove", "recreate":
+		return devcontainerLifecycle(ctx, p, rt, sub, args)
+	default:
+		return fmt.Errorf("unknown devcontainer subcommand %q (create | here | list | status | stop | remove | recreate)", sub)
+	}
+}
+
+// devcontainerHere generates .devcontainer/devcontainer.json for the *git
+// repository* the current directory belongs to, using the repo root as the
+// workspace so the container is scoped to exactly the repository — not a
+// subdirectory of it, and not a parent that happens to contain it. This is the
+// common case ("set this repo up for VS Code"), removing the need to name the
+// path or stand in the root by hand.
+func devcontainerHere(p *output.Printer, args []string) error {
+	start, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	root, err := git.RepoRoot(start)
+	if err != nil {
+		return fmt.Errorf("devcontainer here needs a git repository: %w", err)
+	}
+	p.Info("scoping the devcontainer to the repository root: %s", root)
+	// Force the workspace to the repo root; everything else is a normal create.
+	return devcontainerCreate(p, append([]string{"--workspace", root}, args...))
+}
+
+func devcontainerCreate(p *output.Printer, args []string) error {
+	fs := flag.NewFlagSet("devcontainer create", flag.ContinueOnError)
+	assistants := fs.String("assistant", "claude", "assistant(s): claude | codex | claude,codex | none")
+	force := fs.Bool("force", false, "overwrite an existing devcontainer.json")
+	fresh := fs.Bool("fresh", false, "rebuild the image before every start; discard the container on stop")
+	dryRun := fs.Bool("dry-run", false, "print the file instead of writing it")
+	workspace := fs.String("workspace", "", "workspace")
+	fs.StringVar(workspace, "w", "", "workspace")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if rest := fs.Args(); len(rest) > 0 {
+		return fmt.Errorf("devcontainer create takes no positional arguments (got %v)", rest)
+	}
+
+	ws, err := resolveWorkspace(*workspace, p)
+	if err != nil {
+		return err
+	}
+	cfg, err := config.Load(ws)
+	if err != nil {
+		return err
+	}
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+	projectID, err := project.ID(ws)
+	if err != nil {
+		return err
+	}
+
+	// The Dev Container is the environment; assistants are selectable
+	// components — create does not implicitly mean Claude, Codex, or both.
+	var selected []assistant.Assistant
+	seen := map[string]bool{}
+	for _, name := range strings.Split(*assistants, ",") {
+		name = assistant.Normalize(name)
+		if name == "none" {
+			continue
+		}
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		a, err := assistant.Lookup(name)
+		if err != nil {
+			return err
+		}
+		if a.Auth() == nil {
+			return fmt.Errorf("%q is not a devcontainer assistant (use: claude, codex, none)", name)
+		}
+		selected = append(selected, a)
+	}
+	if seen["claude"] && seen["codex"] {
+		// Enabling both unions the egress allowlists: one container can reach
+		// api.anthropic.com *and* api.openai.com while holding both credential
+		// sets. Two exfiltration channels, one blast radius.
+		p.Warn("both assistants enabled: the egress allowlist is the union of both, and both credential sets are mounted — two exfiltration channels, one blast radius")
+	}
+
+	selfPath := ""
+	if *fresh {
+		selfPath, err = os.Executable()
+		if err != nil || selfPath == "" {
+			return fmt.Errorf("--fresh needs aibox on disk to name in initializeCommand")
+		}
+	}
+
+	gitInfo := git.Resolve(ws)
+	gitMounts := git.Plan(gitInfo, cfg.Git.History, ws)
+	for _, w := range gitMounts.Warnings {
+		p.Warn("%s", w)
+	}
+
+	// The git-remote guard (§8.9) applies to devcontainers too: a relay
+	// service backend matching a git remote reopens a network path git push
+	// could use.
+	if len(cfg.Services) > 0 {
+		services, err := relay.Resolve(cfg.Services)
+		if err != nil {
+			return err
+		}
+		for _, c := range relay.FindGitRemoteConflicts(services, git.Remotes(ws)) {
+			p.Warn("relay service %q (backend %s) matches git remote %q (%s) — the read-only .git mount still blocks writes, but this is no longer belt-and-braces", c.Service, c.Backend, c.Remote, c.URL)
+		}
+		p.Info("services are configured: run 'aibox relay start' before opening the container, and the relay client wiring is generated by 'aibox run' (devcontainer relay wiring is not auto-generated in v1)")
+	}
+
+	content, err := devcontainer.Generate(devcontainer.Options{
+		Config:      cfg,
+		Workspace:   ws,
+		ProjectID:   projectID,
+		ProjectName: filepath.Base(ws),
+		Assistants:  selected,
+		GitMounts:   gitMounts,
+		Fresh:       *fresh,
+		SelfPath:    selfPath,
+		SELinux:     doctor.SELinuxEnforcing(),
+	})
+	if err != nil {
+		return err
+	}
+
+	if *dryRun {
+		fmt.Print(content)
+		return nil
+	}
+	dir := filepath.Join(ws, ".devcontainer")
+	file := filepath.Join(dir, "devcontainer.json")
+	if _, err := os.Stat(file); err == nil && !*force {
+		return fmt.Errorf("%s already exists — pass --force to overwrite it", file)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(file, []byte(content), 0o644); err != nil {
+		return err
+	}
+	p.Good("wrote", "%s", file)
+	// Reference the environment notes from each selected assistant's
+	// instruction file, if the repo has none yet.
+	ensureAssistantDocs(p, ws, selected)
+	if cfg.Egress.Mode == "proxy" {
+		p.Info("egress proxy mode: run 'aibox egress start' before VS Code opens the container")
+	}
+	p.Info("in VS Code: 'Dev Containers: Reopen in Container' (set dev.containers.dockerPath to podman)")
+	p.Info("aibox owns the lifecycle from here: 'aibox devcontainer status | stop | remove'")
+	return nil
+}
+
+func devcontainerLifecycle(ctx context.Context, p *output.Printer, rt *runtime.Podman, sub string, args []string) error {
+	fs := flag.NewFlagSet("devcontainer "+sub, flag.ContinueOnError)
+	jsonOut := fs.Bool("json", false, "print JSON")
+	workspace := fs.String("workspace", "", "workspace")
+	fs.StringVar(workspace, "w", "", "workspace")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if !rt.Available() {
+		return fmt.Errorf("podman is not installed")
+	}
+	lc := devcontainer.Lifecycle{RT: rt}
+
+	if sub == "list" {
+		found, err := lc.List(ctx)
+		if err != nil {
+			return err
+		}
+		return printContainers(found, *jsonOut)
+	}
+
+	ws, err := resolveWorkspace(*workspace, p)
+	if err != nil {
+		return err
+	}
+	projectID, err := project.ID(ws)
+	if err != nil {
+		return err
+	}
+
+	switch sub {
+	case "status":
+		found, err := lc.Status(ctx, projectID)
+		if err != nil {
+			return err
+		}
+		if len(found) == 0 && !*jsonOut {
+			p.Info("no devcontainer for this project (project id %s)", projectID)
+			return nil
+		}
+		return printContainers(found, *jsonOut)
+	case "stop":
+		stopped, err := lc.Stop(ctx, projectID)
+		for _, name := range stopped {
+			p.Info("stopped %s", name)
+		}
+		if err == nil && len(stopped) == 0 {
+			p.Info("nothing running for this project")
+		}
+		return err
+	case "remove":
+		removed, err := lc.Remove(ctx, projectID)
+		for _, name := range removed {
+			p.Info("removed %s (named auth/config/cache volumes kept)", name)
+		}
+		if err == nil && len(removed) == 0 {
+			p.Info("nothing to remove for this project")
+		}
+		return err
+	case "recreate":
+		removed, err := lc.Remove(ctx, projectID)
+		if err != nil {
+			return err
+		}
+		for _, name := range removed {
+			p.Info("removed %s", name)
+		}
+		cfg, err := config.Load(ws)
+		if err != nil {
+			return err
+		}
+		if err := ensureImage(ctx, p, rt, cfg, false, false); err != nil {
+			return err
+		}
+		p.Info("recreated state cleared — reopen the folder in VS Code to build a fresh container from %s", image.Ref(cfg))
+		return nil
+	}
+	return nil
+}
+
+func printContainers(found []runtime.Container, jsonOut bool) error {
+	if jsonOut {
+		if found == nil {
+			found = []runtime.Container{}
+		}
+		return output.JSON(found)
+	}
+	if len(found) == 0 {
+		fmt.Println("no aibox devcontainers")
+		return nil
+	}
+	fmt.Printf("  %-40s %-10s %-12s %s\n", "NAME", "STATE", "PROJECT", "PATH")
+	for _, c := range found {
+		fmt.Printf("  %-40s %-10s %-12s %s\n", c.Name, c.State,
+			c.Labels["io.aibox.project.id"], c.Labels["io.aibox.project.path"])
+	}
+	return nil
+}

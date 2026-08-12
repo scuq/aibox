@@ -1,0 +1,7 @@
+#!/bin/sh
+# Prints the environment notes. The canonical copy is generated at container
+# start; the image layer is the fallback for exotic entrypoint-less runs.
+if [ -s /run/aibox/ainotes.md ]; then
+    exec cat /run/aibox/ainotes.md
+fi
+exec cat /usr/share/aibox/ainotes-image.md

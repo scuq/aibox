@@ -1,0 +1,40 @@
+# aibox base egress allowlist — always applied. Squid dstdomain syntax, one
+# destination per line:
+#   api.example.com     exactly this host
+#   .example.com        this domain and every subdomain
+# Comment lines start with '#' and must be whole lines: squid reads the file
+# one value per line.
+
+# --- Development: trim to what your projects actually use ---
+# npm.
+registry.npmjs.org
+# pip and uv.
+pypi.org
+files.pythonhosted.org
+# Go modules: the proxy serves the code, the sum db verifies it, and a go.mod
+# asking for a newer toolchain downloads it through the same proxy.
+proxy.golang.org
+sum.golang.org
+# ansible-galaxy collection/role installs (collections land in the cache
+# volume via ANSIBLE_HOME, so this is mostly a first-run cost). Two hosts
+# because Galaxy serves only the API itself: the artifact download is a 302
+# to this S3 bucket, and allowing only the first host lets the metadata
+# resolve and then fails the actual fetch. Roles install from github.com,
+# which is allowed below.
+galaxy.ansible.com
+ansible-galaxy-ng.s3.dualstack.us-east-1.amazonaws.com
+# git over https — note that an allowed github.com is still a usable
+# exfiltration channel; drop it for review-only sessions.
+github.com
+codeload.github.com
+objects.githubusercontent.com
+# apt, for --allow-pkg sessions.
+deb.debian.org
+security.debian.org
+
+# --- VS Code dev containers (drop unless you use `aibox devcontainer`) ---
+update.code.visualstudio.com
+vscode.download.prss.microsoft.com
+marketplace.visualstudio.com
+.vscode-unpkg.net
+.gallerycdn.vsassets.io

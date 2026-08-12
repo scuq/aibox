@@ -1,0 +1,9 @@
+# aibox egress allowlist fragment: Codex. Applied when the codex assistant is
+# enabled.
+
+# The API itself.
+api.openai.com
+# ChatGPT-account login and OAuth.
+auth.openai.com
+chatgpt.com
+platform.openai.com

@@ -7,37 +7,33 @@ on:
   workflow_dispatch:
 
 jobs:
-  lint:
-    name: shellcheck
+  go:
+    name: aibox (build, vet, staticcheck, tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: |
+          out="$(gofmt -l .)"
+          if [ -n "$out" ]; then echo "gofmt needed on:"; echo "$out"; exit 1; fi
+      - name: go vet
+        run: go vet ./...
+      - name: staticcheck
+        run: go run honnef.co/go/tools/cmd/staticcheck@latest ./...
+      - name: unit tests
+        run: go test ./...
+      - name: build
+        run: make build
+
+  shell:
+    name: shellcheck (embedded container shell)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Install shellcheck
         run: sudo apt-get update && sudo apt-get install -y shellcheck
-      - name: Lint bclaude and the embedded entrypoint
-        run: |
-          shellcheck -S warning bclaude tests/run-tests.sh
-          ./bclaude show entrypoint > /tmp/entrypoint.sh
-          shellcheck -S warning /tmp/entrypoint.sh
-
-  test-fast:
-    name: unit tests (no podman)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: tests/run-tests.sh --fast
-
-  test-full:
-    name: build + run the container
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install podman
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y podman uidmap
-          podman --version
-      - name: Doctor
-        run: ./bclaude doctor
-      - name: Full test suite
-        run: tests/run-tests.sh
+      - name: Lint the aibox container shell
+        run: shellcheck -S warning assets/entrypoint.sh assets/git-shim.sh assets/ainotes/generate-image-notes.sh assets/ainotes/ainotes
