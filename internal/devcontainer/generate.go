@@ -168,7 +168,9 @@ func Generate(o Options) (string, error) {
 	for _, t := range o.GitMounts.Tmpfs {
 		w("        %q,\n", strings.Join(t.Args(), "="))
 	}
-	w("        \"--tmpfs=/run/aibox:rw,nosuid,nodev,size=64k,uid=1000,gid=1000\",\n")
+	// mode=1777 (not uid=/gid=, which podman's --tmpfs rejects) so uid 1000
+	// can write the notes under cap-drop=ALL.
+	w("        \"--tmpfs=/run/aibox:rw,nosuid,nodev,mode=1777,size=64k\",\n")
 	w("        \"--tmpfs=/tmp:rw,nosuid,nodev,exec,size=%s\"\n", cfg.Runtime.TmpfsSize)
 	w("    ],\n")
 

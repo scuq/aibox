@@ -87,6 +87,25 @@ func TestRunSpecDefaults(t *testing.T) {
 	}
 }
 
+func TestRunSpecRunAiboxTmpfs(t *testing.T) {
+	// podman's --tmpfs rejects uid=/gid= options (it is not the kernel mount
+	// parser); /run/aibox must be made writable with mode=1777, not ownership.
+	argv := argvString(t, testInputs(t), false)
+	if !strings.Contains(argv, "--tmpfs /run/aibox:rw,nosuid,nodev,mode=1777,size=64k") {
+		t.Errorf("/run/aibox tmpfs wrong:\n%s", argv)
+	}
+	// No tmpfs may carry a uid=/gid= option (podman errors on it). Scan every
+	// --tmpfs token.
+	fields := strings.Fields(argv)
+	for i, f := range fields {
+		if f == "--tmpfs" && i+1 < len(fields) {
+			if strings.Contains(fields[i+1], "uid=") || strings.Contains(fields[i+1], "gid=") {
+				t.Errorf("tmpfs carries an invalid uid/gid option: %s", fields[i+1])
+			}
+		}
+	}
+}
+
 func TestRunSpecReadOnlyWorkspace(t *testing.T) {
 	in := testInputs(t)
 	in.Config.Runtime.WorkspaceMode = "read-only"

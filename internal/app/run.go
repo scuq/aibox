@@ -246,11 +246,13 @@ func composeSpec(in sessionInputs) (*container.Spec, error) {
 		Options: []string{"rw", "nosuid", "nodev", "exec", "size=" + cfg.Runtime.TmpfsSize},
 	})
 	// /run/aibox holds the generated environment notes. It is a tmpfs because
-	// /run in the container is root-owned; uid/gid make it writable by the
-	// aibox user the entrypoint runs as.
+	// /run in the container is root-owned and cap-drop=ALL means the aibox
+	// user cannot mkdir there. mode=1777 (sticky, world-writable, like /tmp)
+	// lets uid 1000 create the notes — podman's --tmpfs rejects uid=/gid=
+	// options, so ownership is not settable this way.
 	spec.Tmpfs = append(spec.Tmpfs, container.TmpfsMount{
 		Dest:    "/run/aibox",
-		Options: []string{"rw", "nosuid", "nodev", "size=64k", "uid=1000", "gid=1000"},
+		Options: []string{"rw", "nosuid", "nodev", "mode=1777", "size=64k"},
 	})
 	spec.Tmpfs = append(spec.Tmpfs, in.GitMounts.Tmpfs...)
 

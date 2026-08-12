@@ -101,6 +101,19 @@ func TestGeneratedContent(t *testing.T) {
 			t.Errorf("devcontainer.json missing %q\n%s", want, out)
 		}
 	}
+	// podman's --tmpfs rejects uid=/gid=; the /run/aibox tmpfs must use
+	// mode=1777 so uid 1000 can write under cap-drop=ALL.
+	if !strings.Contains(out, `"--tmpfs=/run/aibox:rw,nosuid,nodev,mode=1777,size=64k"`) {
+		t.Errorf("/run/aibox tmpfs wrong or carries invalid options:\n%s", out)
+	}
+	if strings.Contains(out, "tmpfs=/run/aibox") && strings.Contains(out, "uid=1000,gid=1000\"") {
+		// the userns arg legitimately has uid=1000,gid=1000; only flag it when
+		// it appears attached to a tmpfs (trailing before a closing quote).
+		if strings.Contains(out, "size=64k,uid=1000") {
+			t.Error("the /run/aibox tmpfs still carries a uid= option podman rejects")
+		}
+	}
+
 	for _, unwanted := range []string{
 		"HTTPS_PROXY",        // no proxy plumbing without proxy mode
 		"initializeCommand",  // no rebuild hook without --fresh
