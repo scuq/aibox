@@ -209,7 +209,8 @@ func appendNetworkChecks(ctx context.Context, rt *runtime.Podman, cfg config.Con
 
 	// aibox-internal must exist as --internal, or the workload's "no route
 	// out" isolation is not actually there.
-	if exists, _ := rt.NetworkExists(ctx, egress.NetInternal); !exists {
+	internalExists, _ := rt.NetworkExists(ctx, egress.NetInternal)
+	if !internalExists {
 		add("warn", fmt.Sprintf("%s not created — run 'aibox net up'", egress.NetInternal))
 	} else if internal, err := rt.NetworkInternal(ctx, egress.NetInternal); err == nil && internal {
 		add("ok", fmt.Sprintf("%s: internal, no route out — workload isolation intact", egress.NetInternal))
@@ -255,13 +256,29 @@ func appendNetworkChecks(ctx context.Context, rt *runtime.Podman, cfg config.Con
 			}
 			nets, _ := rt.ContainerNetworks(ctx, c.Name)
 			joined := strings.Join(nets, ", ")
-			status := "ok"
-			// A workload on anything other than aibox-internal alone is a
-			// posture leak worth flagging.
-			if cfg.Egress.Mode == "proxy" && (len(nets) != 1 || nets[0] != egress.NetInternal) {
-				status = "warn"
+			if joined == "" {
+				joined = "(none)"
 			}
-			add(status, fmt.Sprintf("workload %s attached to: %s", c.Name, joined))
+			onInternal := false
+			for _, n := range nets {
+				if n == egress.NetInternal {
+					onInternal = true
+				}
+			}
+			// If the isolated network exists on this host but a managed
+			// workload is not on it, that workload has a route out and its
+			// egress is not going through squid — surface it, with the fix.
+			// Most commonly a devcontainer generated before egress proxy was
+			// enabled, so its runArgs carry no --network=aibox-internal.
+			if internalExists && !onInternal {
+				detail := fmt.Sprintf("workload %s attached to: %s — NOT on %s, so it has a route out and its egress bypasses squid", c.Name, joined, egress.NetInternal)
+				if c.Labels[container.LabelMode] == container.ModeDevcontainer {
+					detail += "; set 'egress: { mode: proxy }' in .aibox.yaml and run 'aibox devcontainer here --force', then rebuild the container"
+				}
+				add("warn", detail)
+			} else {
+				add("ok", fmt.Sprintf("workload %s attached to: %s", c.Name, joined))
+			}
 		}
 	}
 

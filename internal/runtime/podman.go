@@ -286,14 +286,28 @@ func (p *Podman) NetworkInternal(ctx context.Context, name string) (bool, error)
 	return strings.TrimSpace(out) == "true", nil
 }
 
-// ContainerNetworks returns the networks a container is attached to.
+// ContainerNetworks returns the networks a container is attached to. When the
+// NetworkSettings.Networks map is empty — a container on podman's default
+// rootless network (pasta/slirp4netns) has no *named* network — it falls back
+// to the HostConfig.NetworkMode so the answer is never blank (an empty result
+// read as "no network" hid that a container was simply on the default one).
 func (p *Podman) ContainerNetworks(ctx context.Context, name string) ([]string, error) {
 	out, err := p.command(ctx, "container", "inspect", name, "--format",
 		"{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}")
 	if err != nil {
 		return nil, err
 	}
-	return strings.Fields(out), nil
+	if nets := strings.Fields(out); len(nets) > 0 {
+		return nets, nil
+	}
+	mode, err := p.command(ctx, "container", "inspect", name, "--format", "{{.HostConfig.NetworkMode}}")
+	if err != nil {
+		return nil, err
+	}
+	if m := strings.TrimSpace(mode); m != "" {
+		return []string{m}, nil
+	}
+	return nil, nil
 }
 
 func (p *Podman) NetworkCreate(ctx context.Context, name string, internal bool, subnet string, labels map[string]string) error {
