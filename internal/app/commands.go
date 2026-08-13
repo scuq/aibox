@@ -6,13 +6,16 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/scuq/aibox/internal/config"
+	"github.com/scuq/aibox/internal/container"
 	"github.com/scuq/aibox/internal/doctor"
 	"github.com/scuq/aibox/internal/egress"
 	"github.com/scuq/aibox/internal/image"
 	"github.com/scuq/aibox/internal/output"
 	"github.com/scuq/aibox/internal/project"
+	"github.com/scuq/aibox/internal/relay"
 	"github.com/scuq/aibox/internal/runtime"
 )
 
@@ -192,6 +195,95 @@ func orNone(s string) string {
 	return s
 }
 
+// appendNetworkChecks adds the egress-topology section to a doctor report:
+// the two aibox networks and their internal/external posture, the sidecars and
+// workloads attached to them, and an active reachability probe from the egress
+// leg. Structural checks are authoritative and fast; the probe is best-effort.
+func appendNetworkChecks(ctx context.Context, rt *runtime.Podman, cfg config.Config, report *doctor.Report) {
+	add := func(status, detail string) {
+		report.Checks = append(report.Checks, doctor.Check{Name: "network", Status: status, Detail: detail})
+		if status == "fail" {
+			report.OK = false
+		}
+	}
+
+	// aibox-internal must exist as --internal, or the workload's "no route
+	// out" isolation is not actually there.
+	if exists, _ := rt.NetworkExists(ctx, egress.NetInternal); !exists {
+		add("warn", fmt.Sprintf("%s not created — run 'aibox net up'", egress.NetInternal))
+	} else if internal, err := rt.NetworkInternal(ctx, egress.NetInternal); err == nil && internal {
+		add("ok", fmt.Sprintf("%s: internal, no route out — workload isolation intact", egress.NetInternal))
+	} else {
+		add("fail", fmt.Sprintf("%s exists but is NOT --internal — the workload would have a route out; recreate with 'aibox net down && aibox net up'", egress.NetInternal))
+	}
+
+	// aibox-egress is the sidecars' way out; it must NOT be internal.
+	egressExists, _ := rt.NetworkExists(ctx, egress.NetEgress)
+	if !egressExists {
+		add("warn", fmt.Sprintf("%s not created — run 'aibox net up'", egress.NetEgress))
+	} else if internal, err := rt.NetworkInternal(ctx, egress.NetEgress); err == nil && internal {
+		add("fail", fmt.Sprintf("%s is --internal — squid and the relay cannot reach out", egress.NetEgress))
+	} else {
+		add("ok", fmt.Sprintf("%s: external, the sidecars' way out", egress.NetEgress))
+	}
+
+	// Sidecars and their attachments.
+	for _, sc := range []struct{ label, name string }{
+		{"squid", egress.ProxyName},
+		{"relay", relay.Name},
+	} {
+		if running, _ := rt.ContainerRunning(ctx, sc.name); running {
+			nets, _ := rt.ContainerNetworks(ctx, sc.name)
+			add("ok", fmt.Sprintf("%s (%s) attached to: %s", sc.label, sc.name, strings.Join(nets, ", ")))
+		} else if sc.label == "squid" {
+			add("warn", fmt.Sprintf("%s (%s) not running — 'aibox net up' starts it", sc.label, sc.name))
+		} else if len(cfg.Services) > 0 {
+			add("warn", fmt.Sprintf("%s (%s) not running though %d service(s) are configured — 'aibox relay start'", sc.label, sc.name, len(cfg.Services)))
+		}
+		// A relay with no configured services is correctly absent; stay quiet.
+	}
+
+	// Running workloads: show each aibox-managed workspace container and the
+	// networks it is on, so "attached to what" covers the containers too.
+	if workloads, err := rt.List(ctx, runtime.Filter{Labels: map[string]string{
+		container.LabelManaged: "true",
+		container.LabelRole:    container.RoleWorkspace,
+	}}); err == nil {
+		for _, c := range workloads {
+			if c.State != "running" {
+				continue
+			}
+			nets, _ := rt.ContainerNetworks(ctx, c.Name)
+			joined := strings.Join(nets, ", ")
+			status := "ok"
+			// A workload on anything other than aibox-internal alone is a
+			// posture leak worth flagging.
+			if cfg.Egress.Mode == "proxy" && (len(nets) != 1 || nets[0] != egress.NetInternal) {
+				status = "warn"
+			}
+			add(status, fmt.Sprintf("workload %s attached to: %s", c.Name, joined))
+		}
+	}
+
+	// Active reachability from the egress leg — the "does it actually reach
+	// out" question. Best-effort: needs the built image (for bash) and the
+	// egress network; a couple of TCP/443 probes to well-known anycast hosts.
+	if egressExists {
+		if imgExists, _ := rt.ImageExists(ctx, image.Ref(cfg)); imgExists {
+			probe := "for h in 1.1.1.1 8.8.8.8; do timeout 3 bash -c \"</dev/tcp/$h/443\" 2>/dev/null && { echo OK; exit 0; }; done; echo NONE"
+			out, _ := rt.Capture(ctx, "run", "--rm", "--network", egress.NetEgress,
+				"--entrypoint", "bash", image.Ref(cfg), "-c", probe)
+			if strings.Contains(out, "OK") {
+				add("ok", fmt.Sprintf("%s reaches the internet (tcp/443 to 1.1.1.1 or 8.8.8.8)", egress.NetEgress))
+			} else {
+				add("warn", fmt.Sprintf("%s could not reach 1.1.1.1/8.8.8.8:443 — the sidecars may have no upstream, or those hosts are blocked here", egress.NetEgress))
+			}
+		} else {
+			add("warn", fmt.Sprintf("skipping the egress reachability probe — image %s is not built yet", image.Ref(cfg)))
+		}
+	}
+}
+
 func cmdDoctor(ctx context.Context, p *output.Printer, rt *runtime.Podman, args []string) int {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	jsonOut := fs.Bool("json", false, "print JSON")
@@ -243,6 +335,13 @@ func cmdDoctor(ctx context.Context, p *output.Printer, rt *runtime.Podman, args 
 	if cfgErr != nil {
 		report.Checks = append(report.Checks, doctor.Check{Name: "config", Status: "fail", Detail: cfgErr.Error()})
 		report.OK = false
+	}
+
+	// The egress topology: which networks exist, whether their internal/
+	// external posture is what the security model requires, what is attached
+	// to what, and whether the egress leg actually reaches out.
+	if pinfo != nil && cfgErr == nil {
+		appendNetworkChecks(ctx, rt, cfg, &report)
 	}
 
 	if *jsonOut {

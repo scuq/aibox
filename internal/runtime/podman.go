@@ -275,6 +275,27 @@ func (p *Podman) NetworkExists(ctx context.Context, name string) (bool, error) {
 	return p.silent(ctx, "network", "exists", name), nil
 }
 
+// NetworkInternal reports whether a network is `--internal` (no route out).
+// aibox-internal must be true (the workload's isolation depends on it) and
+// aibox-egress must be false (the sidecars' way out) — doctor checks both.
+func (p *Podman) NetworkInternal(ctx context.Context, name string) (bool, error) {
+	out, err := p.command(ctx, "network", "inspect", name, "--format", "{{.Internal}}")
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(out) == "true", nil
+}
+
+// ContainerNetworks returns the networks a container is attached to.
+func (p *Podman) ContainerNetworks(ctx context.Context, name string) ([]string, error) {
+	out, err := p.command(ctx, "container", "inspect", name, "--format",
+		"{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}")
+	if err != nil {
+		return nil, err
+	}
+	return strings.Fields(out), nil
+}
+
 func (p *Podman) NetworkCreate(ctx context.Context, name string, internal bool, subnet string, labels map[string]string) error {
 	args := []string{"network", "create"}
 	if internal {
