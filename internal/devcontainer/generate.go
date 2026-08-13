@@ -34,12 +34,10 @@ type Options struct {
 	ProjectName string
 	Assistants  []assistant.Assistant
 	GitMounts   git.Mounts
-	// Fresh adds an initializeCommand that rebuilds the image before every
-	// start, plus --rm so the container is recreated from it rather than
-	// revived. SelfPath is the aibox binary the command names.
-	Fresh    bool
-	SelfPath string
-	SELinux  bool
+	// Fresh adds an image rebuild to the initializeCommand and --rm so the
+	// container is recreated from the fresh image rather than revived.
+	Fresh   bool
+	SELinux bool
 
 	// EphemeralHostPath / EphemeralMount wire the host-shared scratch dir into
 	// the devcontainer. Empty when disabled.
@@ -77,6 +75,13 @@ func mountString(m container.Mount, selinux bool) string {
 // Generate renders devcontainer.json. JSONC on purpose — the comments carry
 // the reasons, and Dev Containers reads comments fine.
 func Generate(o Options) (string, error) {
+	// A devcontainer is ALWAYS network-isolated: it joins only aibox-internal
+	// (no route out) with the squid proxy env set, regardless of egress.mode.
+	// A persistent IDE-attached container must never silently sit on podman's
+	// default route-out network. Forcing proxy mode here makes the network and
+	// proxy-env blocks below fire unconditionally, and the policy layer in the
+	// notes reflect it. `open` mode only ever governs ephemeral `aibox run`.
+	o.Config.Egress.Mode = "proxy"
 	cfg := o.Config
 	var b strings.Builder
 	w := func(format string, args ...any) { fmt.Fprintf(&b, format, args...) }
@@ -110,14 +115,19 @@ func Generate(o Options) (string, error) {
     "updateRemoteUserUID": false,
 `)
 
+	// initializeCommand runs on the host before every start. It brings the
+	// isolated network + squid up ('aibox net up') so the forced
+	// --network=aibox-internal below can never fail with "network not found",
+	// and (with --fresh) rebuilds the image first. Needs aibox on the host
+	// PATH, which `make install` provides.
+	initCmd := "aibox net up"
 	if o.Fresh {
-		w(`    // --fresh: rebuild the image on the host before every start, so an aibox
-    // you upgraded reaches this project without you remembering to rebuild.
-    // The absolute path is why this file stops being portable — regenerate
-    // without --fresh before committing it somewhere aibox isn't installed.
-    "initializeCommand": [%q, "image", "build", "--image", %q],
-`, o.SelfPath, image.Ref(cfg))
+		// --fresh: rebuild before every start so an aibox/image you updated
+		// reaches this project without remembering to rebuild, then net up.
+		initCmd = fmt.Sprintf("aibox image build --image %s && aibox net up", shellQuote(image.Ref(cfg)))
 	}
+	initJSON, _ := json.Marshal([]string{"/bin/sh", "-c", initCmd})
+	w("    \"initializeCommand\": %s,\n", initJSON)
 
 	// Volumes: per-assistant config+auth, the shared cache, and the read-only
 	// .git policy mounts — the same decisions `aibox run` makes.
@@ -171,13 +181,11 @@ func Generate(o Options) (string, error) {
 	for _, kv := range sortedLabelArgs(labels) {
 		w("        %q,\n", "--label="+kv)
 	}
-	if cfg.Egress.Mode == "proxy" {
-		w(`        // Internal network: no route out except the squid sidecar. The proxy
-        // must be up before this container starts: 'aibox egress start'.
-        // The VS Code server download hosts are in the base allowlist.
-        "--network=%s",
-`, egress.NetInternal)
-	}
+	// Always the internal network: no route out except the squid sidecar. The
+	// initializeCommand above (aibox net up) guarantees it exists and squid is
+	// running before this container starts; the VS Code server download hosts
+	// are in the base allowlist.
+	w("        \"--network=%s\",\n", egress.NetInternal)
 	for _, t := range o.GitMounts.Tmpfs {
 		w("        %q,\n", strings.Join(t.Args(), "="))
 	}
@@ -187,7 +195,10 @@ func Generate(o Options) (string, error) {
 	w("        \"--tmpfs=/tmp:rw,nosuid,nodev,exec,size=%s\"\n", cfg.Runtime.TmpfsSize)
 	w("    ],\n")
 
-	if cfg.Egress.Mode == "proxy" {
+	{
+		// Always set: the container's only route out is squid, so tools must
+		// be told where the one door is (both cases — curl reads one, most
+		// CLIs the other).
 		proxyURL, err := egress.ProxyURL(cfg.Egress.Subnet)
 		if err != nil {
 			return "", err
@@ -290,6 +301,11 @@ func postStartCommand(o Options) string {
 		`ln -sf /run/aibox/ainotes.md "$HOME/.ainotes" 2>/dev/null || true`,
 	)
 	return strings.Join(parts, "; ")
+}
+
+// shellQuote single-quotes a token for embedding in a /bin/sh command.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 func assistantNames(as []assistant.Assistant) string {

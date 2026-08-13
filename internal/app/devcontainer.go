@@ -118,14 +118,6 @@ func devcontainerCreate(p *output.Printer, args []string) error {
 		p.Warn("both assistants enabled: the egress allowlist is the union of both, and both credential sets are mounted — two exfiltration channels, one blast radius")
 	}
 
-	selfPath := ""
-	if *fresh {
-		selfPath, err = os.Executable()
-		if err != nil || selfPath == "" {
-			return fmt.Errorf("--fresh needs aibox on disk to name in initializeCommand")
-		}
-	}
-
 	gitInfo := git.Resolve(ws)
 	gitMounts := git.Plan(gitInfo, cfg.Git.History, ws)
 	for _, w := range gitMounts.Warnings {
@@ -154,7 +146,6 @@ func devcontainerCreate(p *output.Printer, args []string) error {
 		Assistants:  selected,
 		GitMounts:   gitMounts,
 		Fresh:       *fresh,
-		SelfPath:    selfPath,
 		SELinux:     doctor.SELinuxEnforcing(),
 	}
 	if cfg.Ephemeral.Enabled {
@@ -191,9 +182,8 @@ func devcontainerCreate(p *output.Printer, args []string) error {
 	// Reference the environment notes from each selected assistant's
 	// instruction file, if the repo has none yet.
 	ensureAssistantDocs(p, ws, selected)
-	if cfg.Egress.Mode == "proxy" {
-		p.Info("egress proxy mode: run 'aibox egress start' before VS Code opens the container")
-	}
+	p.Info("the container is network-isolated: it joins only aibox-internal (no route out) and reaches the network through the squid allowlist")
+	p.Info("its initializeCommand runs 'aibox net up' on every start, so squid and the networks come up automatically (aibox must be on your PATH)")
 	p.Info("in VS Code: 'Dev Containers: Reopen in Container' (set dev.containers.dockerPath to podman)")
 	p.Info("aibox owns the lifecycle from here: 'aibox devcontainer status | stop | remove'")
 	return nil

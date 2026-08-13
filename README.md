@@ -24,11 +24,12 @@ aibox devcontainer here           # write .devcontainer/devcontainer.json for
 ```
 
 Then in VS Code: **Dev Containers: Reopen in Container** (set
-`dev.containers.dockerPath` to `podman`). The container joins only the internal
-network; all outbound traffic goes through the squid allowlist, and named
-services through the relay. `aibox net up` is a one-time step — the sidecars
-stay running across every session and every time VS Code opens or closes the
-container. Tear it all down with `aibox net down`.
+`dev.containers.dockerPath` to `podman`). A devcontainer is **always**
+network-isolated — it joins only `aibox-internal` (no route out) with the squid
+proxy, regardless of `egress.mode`, and its `initializeCommand` runs `aibox net
+up` on every start, so the networks and squid come up automatically (aibox just
+needs to be on your PATH). The `aibox net up` above is therefore optional but
+harmless. Tear the shared sidecars down with `aibox net down`.
 
 > `aibox net up` starts **squid** (the egress allowlist proxy) and, when your
 > `.aibox.yaml` declares `services:`, the **relay**. Run it once; `aibox run`

@@ -96,6 +96,13 @@ func TestGeneratedContent(t *testing.T) {
 		`"go.goroot": "/usr/local/go"`,
 		`"go.toolsManagement.autoUpdate": false`,
 		`"python.defaultInterpreterPath": "/usr/bin/python3"`,
+		// A devcontainer is ALWAYS network-isolated, even with the default
+		// (open) egress config: only aibox-internal, with the squid proxy env,
+		// and net up in the initializeCommand so the network is guaranteed up.
+		`"--network=aibox-internal"`,
+		`"HTTPS_PROXY": "http://10.199.0.2:3128"`,
+		// default (non-fresh): the initializeCommand only brings the network up
+		`"initializeCommand": ["/bin/sh","-c","aibox net up"]`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("devcontainer.json missing %q\n%s", want, out)
@@ -128,8 +135,6 @@ func TestGeneratedContent(t *testing.T) {
 	}
 
 	for _, unwanted := range []string{
-		"HTTPS_PROXY",        // no proxy plumbing without proxy mode
-		"initializeCommand",  // no rebuild hook without --fresh
 		`"--rm"`,             // not disposable by default
 		"aibox-config-codex", // codex not selected
 		".gitconfig",         // never the host git identity
@@ -137,6 +142,21 @@ func TestGeneratedContent(t *testing.T) {
 		if strings.Contains(out, unwanted) {
 			t.Errorf("devcontainer.json should not contain %q", unwanted)
 		}
+	}
+}
+
+func TestAlwaysIsolatedEvenInOpenMode(t *testing.T) {
+	// The whole point: a devcontainer generated from an open-egress config is
+	// still pinned to aibox-internal with the proxy env — it can never sit on
+	// podman's default route-out network.
+	o := opts(t)
+	o.Config.Egress.Mode = "open"
+	out := gen(t, o)
+	if !strings.Contains(out, `"--network=aibox-internal"`) {
+		t.Error("an open-mode devcontainer must still join aibox-internal")
+	}
+	if !strings.Contains(out, `"HTTPS_PROXY": "http://10.199.0.2:3128"`) {
+		t.Error("an open-mode devcontainer must still route through squid")
 	}
 }
 
@@ -159,10 +179,13 @@ func TestEgressProxyMode(t *testing.T) {
 func TestFresh(t *testing.T) {
 	o := opts(t)
 	o.Fresh = true
-	o.SelfPath = "/home/u/.local/bin/aibox"
 	out := gen(t, o)
-	if !strings.Contains(out, `"initializeCommand": ["/home/u/.local/bin/aibox", "image", "build", "--image", "localhost/aibox:latest"]`) {
-		t.Errorf("--fresh must rebuild the image the file names:\n%s", out)
+	// --fresh: the initializeCommand rebuilds the image and then brings the
+	// network up, both on the host before every start. (&& is JSON-escaped to
+	// &&, so assert the two halves rather than the operator.)
+	if !strings.Contains(out, `aibox image build --image 'localhost/aibox:latest'`) ||
+		!strings.Contains(out, `aibox net up`) {
+		t.Errorf("--fresh must rebuild the image then net up:\n%s", out)
 	}
 	if !strings.Contains(out, `"--rm"`) {
 		t.Error("--fresh must discard the container on stop")
