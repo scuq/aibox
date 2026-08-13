@@ -99,6 +99,11 @@ aibox devcontainer create [--assistant claude|codex|claude,codex|none]
                           [--fresh] [--force] [--dry-run]
 aibox devcontainer list|status|stop|remove|recreate   label-scoped lifecycle
 
+aibox ephemeral [shell | clear] [--json]  the /ephemeral scratch mount shared
+                                          with the host (outside the git repo);
+                                          bare form prints the host path for
+                                          cd "$(aibox ephemeral)"
+
 aibox notes [--size | --claude-md]        the environment notes
 aibox notes project init                  scaffold .aibox/ainotes.md
 aibox handoff [--diff | --clear]          print HANDOFF.md + the git commands

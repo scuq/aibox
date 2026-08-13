@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -96,3 +97,27 @@ func AuthVolumeName(assistant string) string {
 // precious, and without it every ephemeral run starts by re-downloading the
 // world.
 const CacheVolumeName = "aibox-cache-shared"
+
+// StateDir is the per-project host state directory, outside any repo, under
+// XDG_STATE_HOME (default ~/.local/state). Discovery/scratch only — never the
+// source of truth (that is runtime labels).
+func StateDir(id string) string {
+	base := os.Getenv("XDG_STATE_HOME")
+	if base == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return ""
+		}
+		base = filepath.Join(home, ".local", "state")
+	}
+	return filepath.Join(base, "aibox", "projects", id)
+}
+
+// EphemeralDir is the per-project scratch directory shared between the host
+// and the container's /ephemeral mount. It lives outside the git repo on
+// purpose — nothing written there is ever part of the project — while staying
+// reachable from the host so a script the agent drops in it can be run
+// (host-side, with the host's unfiltered network) by the user.
+func EphemeralDir(id string) string {
+	return filepath.Join(StateDir(id), "ephemeral")
+}

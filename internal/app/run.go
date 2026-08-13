@@ -173,6 +173,11 @@ type sessionInputs struct {
 	// install into the container. Empty when no services are configured.
 	RelaySSHConfigPath string
 	RelayServicesPath  string
+
+	// EphemeralHostPath / EphemeralMount wire the host-shared scratch dir into
+	// the container. Empty when disabled.
+	EphemeralHostPath string
+	EphemeralMount    string
 }
 
 // composeSpec is the pure heart of `aibox run`: resolved inputs go in, the
@@ -197,6 +202,13 @@ func composeSpec(in sessionInputs) (*container.Spec, error) {
 	mounts = append(mounts, container.Mount{
 		Type: container.MountVolume, Source: project.CacheVolumeName, Dest: "/home/aibox/.cache",
 	})
+	// The host-shared scratch mount, read-write. Outside the git repo, owned by
+	// the host user via the keep-id mapping so files pass cleanly both ways.
+	if in.EphemeralHostPath != "" {
+		mounts = append(mounts, container.Mount{
+			Type: container.MountBind, Source: in.EphemeralHostPath, Dest: in.EphemeralMount,
+		})
+	}
 	mounts = append(mounts, in.GitMounts.Mounts...)
 
 	env := []container.EnvVar{
@@ -425,6 +437,10 @@ func cmdRun(ctx context.Context, p *output.Printer, rt *runtime.Podman, args []s
 		RelaySSHConfigPath: relaySSHPath,
 		RelayServicesPath:  relaySvcPath,
 	}
+	if cfg.Ephemeral.Enabled {
+		in.EphemeralHostPath = project.EphemeralDir(projectID)
+		in.EphemeralMount = cfg.Ephemeral.Mount
+	}
 
 	if o.seedCreds {
 		seed := hostCredentialsPath(asst)
@@ -480,6 +496,15 @@ func cmdRun(ctx context.Context, p *output.Printer, rt *runtime.Podman, args []s
 	if err := ensureVolumes(ctx, rt, p, asst, projectID, ws); err != nil {
 		p.Error("%s", err)
 		return 1
+	}
+	// The host must own the scratch dir before podman bind-mounts it, or the
+	// mount source does not exist. Created once, reused across runs.
+	if in.EphemeralHostPath != "" {
+		if err := os.MkdirAll(in.EphemeralHostPath, 0o755); err != nil {
+			p.Error("could not create the ephemeral scratch dir: %s", err)
+			return 1
+		}
+		p.Info("scratch: %s ↔ %s (shared with the host; 'aibox ephemeral' to reach it)", in.EphemeralMount, in.EphemeralHostPath)
 	}
 	// Create the assistant's instruction file (CLAUDE.md / AGENTS.md) pointing
 	// at the environment notes, if the repo has none. Only when the workspace

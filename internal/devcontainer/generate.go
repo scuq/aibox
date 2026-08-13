@@ -40,6 +40,11 @@ type Options struct {
 	Fresh    bool
 	SelfPath string
 	SELinux  bool
+
+	// EphemeralHostPath / EphemeralMount wire the host-shared scratch dir into
+	// the devcontainer. Empty when disabled.
+	EphemeralHostPath string
+	EphemeralMount    string
 }
 
 // Name is the devcontainer's display name.
@@ -123,6 +128,11 @@ func Generate(o Options) (string, error) {
 	mounts = append(mounts, container.Mount{
 		Type: container.MountVolume, Source: project.CacheVolumeName, Dest: "/home/aibox/.cache",
 	})
+	if o.EphemeralHostPath != "" {
+		mounts = append(mounts, container.Mount{
+			Type: container.MountBind, Source: o.EphemeralHostPath, Dest: o.EphemeralMount,
+		})
+	}
 	mounts = append(mounts, o.GitMounts.Mounts...)
 	w("    \"mounts\": [\n")
 	for i, m := range mounts {

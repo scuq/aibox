@@ -24,6 +24,7 @@ type Config struct {
 	Egress       EgressConfig       `yaml:"egress"`
 	Devcontainer DevcontainerConfig `yaml:"devcontainer"`
 	Notes        NotesConfig        `yaml:"notes"`
+	Ephemeral    EphemeralConfig    `yaml:"ephemeral"`
 
 	// Services are named TCP (or best-effort UDP) endpoints reachable through
 	// the relay sidecar (§8). The container is granted named services, not
@@ -167,6 +168,14 @@ type DevcontainerVSCode struct {
 	Extensions []string `yaml:"extensions"`
 }
 
+// EphemeralConfig controls the host-shared scratch mount (/ephemeral). It is
+// backed by a per-project directory outside the repo, so it needs no
+// gitignoring and nothing written there can reach the project by accident.
+type EphemeralConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	Mount   string `yaml:"mount"` // in-container path, default /ephemeral
+}
+
 type NotesConfig struct {
 	// Project is the repo's own ainotes layer, concatenated after the image
 	// and policy layers so a repo can add conventions but not delete policy.
@@ -209,13 +218,19 @@ func Defaults() Config {
 			ProxyImage: "docker.io/ubuntu/squid:latest",
 			RelayImage: "docker.io/library/haproxy:lts-alpine",
 		},
+		Ephemeral: EphemeralConfig{
+			Enabled: true,
+			Mount:   "/ephemeral",
+		},
 		Notes: NotesConfig{
 			Project: ".aibox/ainotes.md",
-			// 4 KB: the notes carry the tool inventory, the egress/relay
-			// model, and the host-hand-off guidance (containers, git push,
-			// allowlisting) — the things an agent most often gets wrong here.
-			// Still a hard cap enforced at image build; plan open-question #5.
-			MaxBytes: 4096,
+			// 5 KB: the notes carry the tool inventory, the egress/relay
+			// model, the host-hand-off guidance (containers, git push,
+			// allowlisting, the /ephemeral scratch drop point) and the
+			// changelog/release convention — the things an agent most often
+			// gets wrong here. Still a hard cap enforced at image build; plan
+			// open-question #5.
+			MaxBytes: 5120,
 		},
 	}
 }
@@ -252,6 +267,12 @@ func (c *Config) Validate() error {
 	}
 	if c.Runtime.Engine != "podman" {
 		return fmt.Errorf("unsupported runtime.engine %q (v1 supports: podman)", c.Runtime.Engine)
+	}
+	if c.Ephemeral.Enabled {
+		m := c.Ephemeral.Mount
+		if m == "" || m[0] != '/' || m == "/" || m == "/work" {
+			return fmt.Errorf("ephemeral.mount %q must be an absolute path other than / or /work", m)
+		}
 	}
 	if len(c.Services) > 0 && c.Egress.Mode != "proxy" {
 		// The relay lives on the internal network (§8). Without proxy mode the

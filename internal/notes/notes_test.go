@@ -109,7 +109,7 @@ func TestImageNotesGeneratorGatesTheBudget(t *testing.T) {
 	// The generator embedded in the image build must contain the size gate —
 	// an over-budget notes file fails the build, not the session.
 	gen := string(assets.Read("ainotes/generate-image-notes.sh"))
-	if !strings.Contains(gen, "budget 3072") || !strings.Contains(gen, "exit 1") {
+	if !strings.Contains(gen, "budget 4096") || !strings.Contains(gen, "exit 1") {
 		t.Error("the image-notes generator lost its budget gate")
 	}
 	// And the git policy is the opening section, so the assistant plans
@@ -128,6 +128,8 @@ func TestImageNotesGeneratorGatesTheBudget(t *testing.T) {
 		"git -C <repo>", "services.json",
 		// changelog + semver-tagged releases
 		"CHANGELOG.md", "## Unreleased", "semver", "git -C <repo> tag -a vX.Y.Z",
+		// the host-shared scratch mount
+		"/ephemeral", "aibox ephemeral",
 	} {
 		if !strings.Contains(gen, want) {
 			t.Errorf("image notes missing the %q guidance", want)

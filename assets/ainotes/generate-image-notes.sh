@@ -88,6 +88,16 @@ to start them here — print the commands and hand them to the user to run on
 the host, e.g.:
     podman run -d --name pg -e POSTGRES_PASSWORD=dev -p 5432:5432 postgres:16
 
+## /ephemeral — scratch shared with the host
+/ephemeral is a read-write directory shared with the host and OUTSIDE the git
+repo; nothing in it is part of the project. Use it to hand work to the host:
+drop a probe/test script there and ask the user to run it on the host, which
+has an unfiltered network this container does not, with:
+    cd "\$(aibox ephemeral)" && ./yourscript
+Files you create in /ephemeral are the user's on the host, and theirs are
+yours here. It is the right place for anything that needs to run outside the
+sandbox — never work around the egress policy from inside.
+
 ## Tools (prefer these over defaults)
 search  rg  fd  ast-grep     view  bat  tree  less     data  jq  yq(YAML)
 net     curl  nc  openssl  expect                       vcs   git(read-only)
@@ -101,16 +111,17 @@ versions: go $GO_V · node $NODE_V · python $PYTHON_V · oc $OC_V · ansible $A
 Caches under ~/.cache persist across runs; re-downloading is unnecessary.
 
 ## Writable paths
-/work (except /work/.git) · /work/.aibox · /tmp · ~/.cache · ~/.ssh
+/work (except /work/.git) · /work/.aibox · /ephemeral (shared w/ host) · /tmp
+· ~/.cache · ~/.ssh
 EOF
 
 # The budget gate. The full notes (image + policy + project) land in the
 # agent's context every session — a recurring token cost, not free
-# documentation. 4096 bytes total; the image layer gets 3072, leaving room for
+# documentation. 5120 bytes total; the image layer gets 4096, leaving room for
 # the run-time policy section and a short project layer. Exceeding it fails
 # the image build, here, loudly.
 size="$(wc -c < "$SHARE/ainotes-image.md")"
-if [ "$size" -gt 3072 ]; then
-    echo "ainotes image layer is $size bytes (budget 3072) — trim it" >&2
+if [ "$size" -gt 4096 ]; then
+    echo "ainotes image layer is $size bytes (budget 4096) — trim it" >&2
     exit 1
 fi

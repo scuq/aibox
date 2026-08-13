@@ -43,6 +43,10 @@ COMMANDS
                       here does the same scoped to the current git repo's root;
                       list | status | stop | remove | recreate manage the
                       containers VS Code created (label-scoped, never by name)
+    ephemeral         Print the host path of the /ephemeral scratch mount
+                      (cd "$(aibox ephemeral)"); shell opens a shell there,
+                      clear empties it. Shared with the container, outside the
+                      git repo — a drop point for scripts run on the host
     notes             Print the environment notes (--size | --claude-md |
                       project init). Inside the container: 'ainotes'
     handoff           Print the session's HANDOFF.md and the exact git commands
@@ -124,6 +128,8 @@ func Main(args []string) int {
 		err = cmdRelay(ctx, p, rt, args[1:])
 	case "devcontainer":
 		err = cmdDevcontainer(ctx, p, rt, args[1:])
+	case "ephemeral":
+		err = cmdEphemeral(p, args[1:])
 	case "notes":
 		err = cmdNotes(ctx, p, rt, args[1:])
 	case "handoff":
