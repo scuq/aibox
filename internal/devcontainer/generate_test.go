@@ -106,6 +106,19 @@ func TestGeneratedContent(t *testing.T) {
 	if !strings.Contains(out, `"--tmpfs=/run/aibox:rw,nosuid,nodev,mode=1777,size=64k"`) {
 		t.Errorf("/run/aibox tmpfs wrong or carries invalid options:\n%s", out)
 	}
+
+	// The entrypoint is bypassed in a devcontainer, so postStartCommand must
+	// render the notes and seed the login from the shared auth volume.
+	for _, want := range []string{
+		`"postStartCommand"`,
+		"/run/aibox/ainotes.md",
+		".ainotes",
+		"/home/aibox/.claude-auth/.credentials.json", // login seeded from the shared volume
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("devcontainer.json missing postStart wiring %q", want)
+		}
+	}
 	if strings.Contains(out, "tmpfs=/run/aibox") && strings.Contains(out, "uid=1000,gid=1000\"") {
 		// the userns arg legitimately has uid=1000,gid=1000; only flag it when
 		// it appears attached to a tmpfs (trailing before a closing quote).

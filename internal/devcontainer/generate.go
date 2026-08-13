@@ -10,6 +10,8 @@
 package devcontainer
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -20,6 +22,7 @@ import (
 	"github.com/scuq/aibox/internal/egress"
 	"github.com/scuq/aibox/internal/git"
 	"github.com/scuq/aibox/internal/image"
+	"github.com/scuq/aibox/internal/notes"
 	"github.com/scuq/aibox/internal/project"
 )
 
@@ -190,6 +193,17 @@ func Generate(o Options) (string, error) {
 `, proxyURL, egress.NoProxy)
 	}
 
+	// Dev Containers starts the container with its own --entrypoint, so
+	// aibox's entrypoint.sh — which renders /run/aibox/ainotes.md and copies
+	// the login from the shared auth volume into the per-project config volume
+	// — never runs here. postStartCommand does the same two things on every
+	// container start, so a devcontainer is logged in and the agent has its
+	// environment notes without a prior `aibox run`.
+	if cmd := postStartCommand(o); cmd != "" {
+		encoded, _ := json.Marshal(cmd)
+		w("    \"postStartCommand\": %s,\n", encoded)
+	}
+
 	// Extensions: the assistants' own, the toolchain ones, then whatever the
 	// project config adds. The Go and Python toolchains are in the image, so
 	// the extensions are pointed at them rather than left to install their
@@ -237,6 +251,35 @@ func Generate(o Options) (string, error) {
 }
 `)
 	return b.String(), nil
+}
+
+// postStartCommand assembles the shell run on every devcontainer start: seed
+// each assistant's login from its shared auth volume (only when the config
+// volume has none, so a refreshed token is never clobbered), then render the
+// environment notes into /run/aibox/ainotes.md and link ~/.ainotes. The
+// policy layer is embedded base64-encoded so its newlines and punctuation
+// survive the trip through JSON and the shell without quoting hazards.
+func postStartCommand(o Options) string {
+	var parts []string
+	for _, a := range o.Assistants {
+		auth := a.Auth()
+		if auth == nil {
+			continue
+		}
+		src := auth.AuthDir + "/" + auth.CredentialFile
+		dst := auth.ConfigDir + "/" + auth.CredentialFile
+		parts = append(parts, fmt.Sprintf(
+			"if [ -s %s ] && [ ! -s %s ]; then install -m 600 %s %s 2>/dev/null || true; fi",
+			src, dst, src, dst))
+	}
+	policy := notes.PolicyLayer(o.Config)
+	b64 := base64.StdEncoding.EncodeToString([]byte(policy))
+	parts = append(parts,
+		"cat /usr/share/aibox/ainotes-image.md 2>/dev/null > /run/aibox/ainotes.md || true",
+		fmt.Sprintf("printf %%s %s | base64 -d >> /run/aibox/ainotes.md 2>/dev/null || true", b64),
+		`ln -sf /run/aibox/ainotes.md "$HOME/.ainotes" 2>/dev/null || true`,
+	)
+	return strings.Join(parts, "; ")
 }
 
 func assistantNames(as []assistant.Assistant) string {
