@@ -70,9 +70,21 @@ func TestSquidConf(t *testing.T) {
 		"stdio:/dev/stdout",                   // one log line per request -> podman logs
 		"acl aibox_clients src 10.199.0.0/24", // only serves the internal subnet
 		"cache deny all",                      // never caches
+		"http_access allow aibox_clients allowed",
 	} {
 		if !strings.Contains(conf, want) {
 			t.Errorf("squid.conf is missing %q", want)
+		}
+	}
+	// The domain allowlist is the enforcement, not the port: allowlisted hosts
+	// must work on any port (internal APIs on :8443, registries on :5000, …),
+	// so the port-based denies must NOT be present.
+	for _, unwanted := range []string{
+		"deny !Safe_ports",
+		"deny CONNECT !SSL_ports",
+	} {
+		if strings.Contains(conf, unwanted) {
+			t.Errorf("squid.conf still restricts ports (%q) — allowlisted hosts on non-standard ports would be blocked", unwanted)
 		}
 	}
 }

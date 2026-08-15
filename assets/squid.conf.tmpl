@@ -11,13 +11,13 @@ shutdown_lifetime 1 seconds
 # Only the internal network may use the proxy.
 acl aibox_clients src {{.Subnet}}
 acl allowed dstdomain "{{.AllowlistPath}}"
-acl SSL_ports port 443
-acl Safe_ports port 80 443
 acl CONNECT method CONNECT
 
-# Deny-by-default: only CONNECT to :443 and plain http to :80 for domains in
-# the allowlist.
-http_access deny !Safe_ports
-http_access deny CONNECT !SSL_ports
+# The domain allowlist is the enforcement — not the port. Ports are
+# deliberately unrestricted so an allowlisted host works on whatever port it
+# actually serves (an internal API on :8443, a registry on :5000, a database
+# over TLS, plain http on :80). A host you did not allow is still denied on
+# every port. Deny-by-default: only allowlisted domains, from the internal
+# network, get out — on any port.
 http_access allow aibox_clients allowed
 http_access deny all
