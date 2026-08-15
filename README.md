@@ -127,7 +127,7 @@ egress:
   allowlist:
     - api.internal.example.com
 services:
-  - name: sw-nw0102-o71
+  - name: sw-nw01
     backend: 10.20.4.11:22
     aliases: [switch1]
   - name: netbox
