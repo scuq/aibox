@@ -42,27 +42,34 @@ func (m *egressManager) enabledAssistants() []string {
 // writeFiles renders squid.conf and the composed allowlist. Both are
 // overwritten in place, never renamed into place: the files are bind-mounted
 // into the sidecar, and a rename would leave the container reading a dead
-// inode.
-func (m *egressManager) writeFiles() (confChanged bool, err error) {
+// inode. Returns changed=true when EITHER file's content changed — a running
+// squid must be reloaded on an allowlist change, not only a squid.conf change,
+// or a freshly-allowed domain stays denied until the proxy is recreated.
+func (m *egressManager) writeFiles() (changed bool, err error) {
 	if err := egress.EnsureFragments(m.enabledAssistants()); err != nil {
 		return false, err
 	}
-	acl, err := egress.Compose(m.enabledAssistants(), m.projectID, m.cfg.Egress.Allowlist)
+	acl, err := egress.Compose(m.enabledAssistants(), m.cfg.Egress.Allowlist)
 	if err != nil {
 		return false, err
+	}
+	if oldACL, _ := os.ReadFile(egress.GeneratedPath()); string(oldACL) != acl {
+		changed = true
 	}
 	if err := os.WriteFile(egress.GeneratedPath(), []byte(acl), 0o644); err != nil {
 		return false, err
 	}
 	conf, err := egress.SquidConf(m.cfg.Egress.Subnet)
 	if err != nil {
-		return false, err
+		return changed, err
 	}
-	old, _ := os.ReadFile(egress.SquidConfPath())
-	if string(old) == conf {
-		return false, nil
+	if oldConf, _ := os.ReadFile(egress.SquidConfPath()); string(oldConf) != conf {
+		changed = true
+		if err := os.WriteFile(egress.SquidConfPath(), []byte(conf), 0o644); err != nil {
+			return changed, err
+		}
 	}
-	return true, os.WriteFile(egress.SquidConfPath(), []byte(conf), 0o644)
+	return changed, nil
 }
 
 // Ensure brings the networks and sidecar up (or up to date).
@@ -70,14 +77,16 @@ func (m *egressManager) Ensure(ctx context.Context) error {
 	if err := m.ensureNetworks(ctx); err != nil {
 		return err
 	}
-	confChanged, err := m.writeFiles()
+	changed, err := m.writeFiles()
 	if err != nil {
 		return err
 	}
 	running, _ := m.rt.ContainerRunning(ctx, egress.ProxyName)
 	if running {
-		if confChanged {
+		if changed {
+			// HUP makes squid re-read both its config and the allowlist file.
 			_ = m.rt.Kill(ctx, egress.ProxyName, "HUP")
+			m.p.Info("egress allowlist updated — reloaded %s (%d entries)", egress.ProxyName, egress.Entries(egress.GeneratedPath()))
 		}
 		return nil
 	}
@@ -358,7 +367,7 @@ func cmdEgress(ctx context.Context, p *output.Printer, rt *runtime.Podman, args 
 		if err := egress.EnsureFragments(m.enabledAssistants()); err != nil {
 			return err
 		}
-		acl, err := egress.Compose(m.enabledAssistants(), projectID, cfg.Egress.Allowlist)
+		acl, err := egress.Compose(m.enabledAssistants(), cfg.Egress.Allowlist)
 		if err != nil {
 			return err
 		}

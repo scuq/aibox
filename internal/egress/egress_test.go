@@ -108,7 +108,7 @@ func TestBaseAllowlistCoversAnsibleGalaxy(t *testing.T) {
 	if err := EnsureFragments(nil); err != nil {
 		t.Fatal(err)
 	}
-	acl, err := Compose(nil, "", nil)
+	acl, err := Compose(nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,20 +132,27 @@ func TestCompose(t *testing.T) {
 	if err := EnsureFragments([]string{"claude"}); err != nil {
 		t.Fatal(err)
 	}
-	// A project fragment on top.
+	// Two project fragments — the shared squid unions BOTH, regardless of which
+	// workspace triggers the compose. This is the reboot regression: a domain
+	// allowed for one project must not vanish when another context (or `net
+	// up`, with no project at all) regenerates the allowlist.
 	if err := os.WriteFile(FragmentPath("project-abc123"), []byte("internal.example.com\n# comment\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(FragmentPath("project-def456"), []byte("other-project.example.com\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
-	acl, err := Compose([]string{"claude"}, "abc123", []string{"cli.example.com", "github.com"})
+	acl, err := Compose([]string{"claude"}, []string{"cli.example.com", "github.com"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		"api.anthropic.com",    // assistant fragment
-		"proxy.golang.org",     // base fragment
-		"internal.example.com", // project fragment
-		"cli.example.com",      // CLI addition
+		"api.anthropic.com",         // assistant fragment
+		"proxy.golang.org",          // base fragment
+		"internal.example.com",      // project abc123 fragment
+		"other-project.example.com", // project def456 fragment — unioned in
+		"cli.example.com",           // CLI addition
 	} {
 		if !strings.Contains(acl, want) {
 			t.Errorf("composed ACL is missing %q", want)
@@ -172,7 +179,7 @@ func TestComposeRejectsMalformedEntries(t *testing.T) {
 	if err := os.WriteFile(FragmentPath("base"), []byte("ok.example.com\nbroken entry with spaces\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Compose(nil, "", nil); err == nil {
+	if _, err := Compose(nil, nil); err == nil {
 		t.Error("a malformed allowlist entry should fail composition, not reach squid")
 	}
 }
