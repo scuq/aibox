@@ -86,6 +86,9 @@ func TestContainerfileKeepsItsPins(t *testing.T) {
 		"lua5.4",
 		// PowerShell's one system dependency
 		"libicu72",
+		// default container environment
+		"LC_ALL=C.UTF-8",
+		"PYTHONPATH=/home/aibox/.cache/pylibs",
 	} {
 		if !strings.Contains(cf, want) {
 			t.Errorf("Containerfile missing %q", want)

@@ -28,6 +28,10 @@ func opts(t *testing.T) Options {
 		GitMounts: git.Plan(git.RepoInfo{
 			IsRepo: true, DotGit: ws + "/.git", CommonDir: ws + "/.git",
 		}, cfg.Git.History, ws),
+		// Ephemeral is enabled by default in real use (devcontainerCreate sets
+		// these from cfg.Ephemeral); reflect that here.
+		EphemeralHostPath: "/home/u/.local/state/aibox/projects/a81f728bc9ef/ephemeral",
+		EphemeralMount:    "/ephemeral",
 	}
 }
 
@@ -115,12 +119,14 @@ func TestGeneratedContent(t *testing.T) {
 	}
 
 	// The entrypoint is bypassed in a devcontainer, so postStartCommand must
-	// render the notes and seed the login from the shared auth volume.
+	// wipe /ephemeral, render the notes, and seed the login from the shared
+	// auth volume.
 	for _, want := range []string{
 		`"postStartCommand"`,
 		"/run/aibox/ainotes.md",
 		".ainotes",
 		"/home/aibox/.claude-auth/.credentials.json", // login seeded from the shared volume
+		"find /ephemeral -mindepth 1 -maxdepth 1",    // wiped each start
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("devcontainer.json missing postStart wiring %q", want)

@@ -126,6 +126,41 @@ func TestLoginHandoff(t *testing.T) {
 	}
 }
 
+func TestEntrypointClearsEphemeral(t *testing.T) {
+	// The entrypoint wipes /ephemeral (AIBOX_EPHEMERAL_DIR in tests) clean at
+	// the start of every session.
+	dir := t.TempDir()
+	eph := filepath.Join(dir, "ephemeral")
+	if err := os.MkdirAll(filepath.Join(eph, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{"leftover.txt", ".hidden", "sub/nested"} {
+		if err := os.WriteFile(filepath.Join(eph, f), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ep := filepath.Join(dir, "entrypoint.sh")
+	if err := os.WriteFile(ep, assets.Read("entrypoint.sh"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("bash", ep, "true")
+	cmd.Env = append(os.Environ(), "AIBOX_ASSISTANT=none", "AIBOX_EPHEMERAL_DIR="+eph, "HOME="+dir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("entrypoint failed: %v\n%s", err, out)
+	}
+	entries, err := os.ReadDir(eph)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("/ephemeral not cleared, still holds: %v", entries)
+	}
+	// The directory itself must survive (it is the mount point).
+	if st, err := os.Stat(eph); err != nil || !st.IsDir() {
+		t.Errorf("the ephemeral dir itself must survive the wipe")
+	}
+}
+
 func TestHandoffYieldingIsReported(t *testing.T) {
 	_, log := epRun(t, "C0", "",
 		`printf C1 > "$CFG/.credentials.json"; printf C2 > "$AUTH/.credentials.json"`)

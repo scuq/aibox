@@ -4,6 +4,15 @@
 # requested command as a child (not exec — see the bottom).
 set -euo pipefail
 
+# Startup housekeeping: /ephemeral is scratch, shared with the host and outside
+# the repo. Wipe it clean at the start of every session so a run never inherits
+# the previous one's leftovers. (AIBOX_EPHEMERAL_DIR lets the test suite point
+# this at a temp dir; in the container it is always /ephemeral.)
+EPHEMERAL_DIR="${AIBOX_EPHEMERAL_DIR:-/ephemeral}"
+if [ -d "$EPHEMERAL_DIR" ]; then
+    find "$EPHEMERAL_DIR" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
+fi
+
 # Which assistant's credential layout applies. "none" (or unset) skips the
 # credential logic entirely — a plain shell session has no login to manage.
 ASSISTANT="${AIBOX_ASSISTANT:-none}"

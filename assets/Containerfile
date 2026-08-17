@@ -346,11 +346,21 @@ RUN AIBOX_PROFILE="$AIBOX_PROFILE" AIBOX_RELEASE="$AIBOX_RELEASE" \
 # without it `git status` tries to refresh and write the index, hits the
 # read-only .git mount, and produces errors that send the agent down a rabbit
 # hole. With it, read-only git is genuinely clean.
+#
+# LC_ALL/LANG=C.UTF-8: a locale that is always present in glibc (no locale-gen)
+# and UTF-8 aware, so tools do not fall back to ASCII or emit "setting locale
+# failed" warnings. PYTHONPATH points at a cache-volume directory so
+# `pip install --target ~/.cache/pylibs` (or code that drops modules there)
+# is importable and survives across ephemeral runs; a missing dir is ignored
+# by Python, so this is harmless until something uses it.
 ENV HOME=/home/aibox \
     SHELL=/bin/bash \
     CLAUDE_CONFIG_DIR=/home/aibox/.claude \
     CODEX_HOME=/home/aibox/.codex \
     GIT_OPTIONAL_LOCKS=0 \
+    LC_ALL=C.UTF-8 \
+    LANG=C.UTF-8 \
+    PYTHONPATH=/home/aibox/.cache/pylibs \
     XDG_CACHE_HOME=/home/aibox/.cache \
     npm_config_prefix=/home/aibox/.npm-global \
     npm_config_cache=/home/aibox/.cache/npm \
@@ -366,7 +376,7 @@ ENV HOME=/home/aibox \
 # .npm-global. Written from $PATH rather than repeating it, so the two cannot
 # drift apart. Losing the shim from PATH would silently disable the loud git
 # policy in terminals, so this line is policy, not convenience.
-RUN printf 'PATH="%s"\nexport PATH\nexport GIT_OPTIONAL_LOCKS=0\n' "$PATH" \
+RUN printf 'PATH="%s"\nexport PATH\nexport GIT_OPTIONAL_LOCKS=0\nexport LC_ALL=C.UTF-8 LANG=C.UTF-8\nexport PYTHONPATH=/home/aibox/.cache/pylibs\n' "$PATH" \
         > /etc/profile.d/10-aibox-path.sh \
     && chmod 0644 /etc/profile.d/10-aibox-path.sh
 

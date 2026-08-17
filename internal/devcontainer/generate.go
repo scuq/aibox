@@ -282,6 +282,13 @@ func Generate(o Options) (string, error) {
 // survive the trip through JSON and the shell without quoting hazards.
 func postStartCommand(o Options) string {
 	var parts []string
+	// Startup housekeeping: wipe /ephemeral clean each start, the same as the
+	// entrypoint does for `aibox run` (the entrypoint is bypassed here).
+	if o.EphemeralHostPath != "" {
+		parts = append(parts, fmt.Sprintf(
+			"if [ -d %[1]s ]; then find %[1]s -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true; fi",
+			o.EphemeralMount))
+	}
 	for _, a := range o.Assistants {
 		auth := a.Auth()
 		if auth == nil {

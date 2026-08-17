@@ -95,7 +95,8 @@ drop a probe/test script there and ask the user to run it on the host, which
 has an unfiltered network this container does not, with:
     cd "\$(aibox ephemeral)" && ./yourscript
 Files you create in /ephemeral are the user's on the host, and theirs are
-yours here. It is the right place for anything that needs to run outside the
+yours here. It is wiped clean at the start of every session, so treat it as
+transient. It is the right place for anything that needs to run outside the
 sandbox — never work around the egress policy from inside.
 
 ## Tools (prefer these over defaults)
