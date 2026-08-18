@@ -64,6 +64,7 @@ func devcontainerCreate(p *output.Printer, args []string) error {
 	assistants := fs.String("assistant", "claude", "assistant(s): claude | codex | claude,codex | none")
 	force := fs.Bool("force", false, "overwrite an existing devcontainer.json")
 	fresh := fs.Bool("fresh", false, "rebuild the image before every start; discard the container on stop")
+	rm := fs.Bool("rm", false, "remove the container when VS Code stops it (nothing lingers between sessions)")
 	dryRun := fs.Bool("dry-run", false, "print the file instead of writing it")
 	workspace := fs.String("workspace", "", "workspace")
 	fs.StringVar(workspace, "w", "", "workspace")
@@ -84,6 +85,9 @@ func devcontainerCreate(p *output.Printer, args []string) error {
 	}
 	if err := cfg.Validate(); err != nil {
 		return err
+	}
+	if *rm {
+		cfg.Devcontainer.RemoveOnStop = true
 	}
 	projectID, err := project.ID(ws)
 	if err != nil {
@@ -191,6 +195,9 @@ func devcontainerCreate(p *output.Printer, args []string) error {
 	ensureAssistantDocs(p, ws, selected)
 	p.Info("the container is network-isolated: it joins only aibox-internal (no route out) and reaches the network through the squid allowlist")
 	p.Info("its initializeCommand runs 'aibox net up' on every start, so squid and the networks come up automatically (aibox must be on your PATH)")
+	if cfg.Devcontainer.RemoveOnStop {
+		p.Info("disposable: VS Code removes the container when you close the window (--rm); volumes persist, and each reopen is a fresh start")
+	}
 	p.Info("in VS Code: 'Dev Containers: Reopen in Container' (set dev.containers.dockerPath to podman)")
 	p.Info("aibox owns the lifecycle from here: 'aibox devcontainer status | stop | remove'")
 	return nil

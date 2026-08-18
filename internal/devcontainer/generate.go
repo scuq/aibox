@@ -120,6 +120,16 @@ func Generate(o Options) (string, error) {
     "updateRemoteUserUID": false,
 `)
 
+	// When the container is disposable, make VS Code stop it on window close
+	// (its default, stated explicitly) — combined with the --rm run arg below,
+	// stopping it also removes it, so nothing lingers between sessions and each
+	// reopen is a genuine fresh start (which also re-wipes /ephemeral). Named
+	// volumes hold everything precious and survive.
+	removeOnStop := o.Fresh || cfg.Devcontainer.RemoveOnStop
+	if removeOnStop {
+		w("    \"shutdownAction\": \"stopContainer\",\n")
+	}
+
 	// initializeCommand runs on the host before every start. It brings the
 	// isolated network + squid up ('aibox net up') so the forced
 	// --network=aibox-internal below can never fail with "network not found",
@@ -167,7 +177,7 @@ func Generate(o Options) (string, error) {
 	// Same flags as 'aibox run' (memory/cpu caps are left out: they would
 	// fail on hosts without delegated cgroups, and this file may travel).
 	w("    \"runArgs\": [\n")
-	if o.Fresh || cfg.Devcontainer.RemoveOnStop {
+	if removeOnStop {
 		w(`        // The container is thrown away when VS Code stops it, so the next
         // start creates one from the current image instead of reviving a
         // snapshot of an older one. What that costs you is anything installed

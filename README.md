@@ -104,9 +104,11 @@ aibox relay list [--json]                 configured services and their ports
 aibox relay test <service>                TCP probe from inside the network
 aibox relay logs [-f]
 
-aibox devcontainer here                   generate for the current git repo root
+aibox devcontainer here [--rm]            generate for the current git repo root
 aibox devcontainer create [--assistant claude|codex|claude,codex|none]
-                          [--fresh] [--force] [--dry-run]
+                          [--rm] [--fresh] [--force] [--dry-run]
+                          --rm: VS Code removes the container on window close,
+                          so each reopen is a fresh, disposable session
 aibox devcontainer list|status|stop|remove|recreate   label-scoped lifecycle
 
 aibox ephemeral [shell | clear] [--json]  the /ephemeral scratch mount shared

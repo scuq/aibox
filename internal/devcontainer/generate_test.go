@@ -142,6 +142,7 @@ func TestGeneratedContent(t *testing.T) {
 
 	for _, unwanted := range []string{
 		`"--rm"`,             // not disposable by default
+		"shutdownAction",     // no forced shutdown behaviour by default
 		"aibox-config-codex", // codex not selected
 		".gitconfig",         // never the host git identity
 	} {
@@ -163,6 +164,25 @@ func TestAlwaysIsolatedEvenInOpenMode(t *testing.T) {
 	}
 	if !strings.Contains(out, `"HTTPS_PROXY": "http://10.199.0.2:3128"`) {
 		t.Error("an open-mode devcontainer must still route through squid")
+	}
+}
+
+func TestRemoveOnStop(t *testing.T) {
+	// removeOnStop makes the container disposable: --rm plus an explicit
+	// stopContainer shutdown, so closing the VS Code window removes it.
+	o := opts(t)
+	o.Config.Devcontainer.RemoveOnStop = true
+	out := gen(t, o)
+	if !strings.Contains(out, `"--rm"`) {
+		t.Error("removeOnStop must add --rm so the stopped container is removed")
+	}
+	if !strings.Contains(out, `"shutdownAction": "stopContainer"`) {
+		t.Error("removeOnStop must set shutdownAction so VS Code stops the container on close")
+	}
+	stripped := commentLine.ReplaceAllString(out, "")
+	var v map[string]any
+	if err := json.Unmarshal([]byte(stripped), &v); err != nil {
+		t.Fatalf("removeOnStop output is not valid JSON: %v", err)
 	}
 }
 
