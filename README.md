@@ -60,10 +60,19 @@ aibox run shell                   # a shell in the same environment
 - **Rootless + hardened.** `--userns=keep-id`, `cap-drop=ALL`,
   `no-new-privileges`, pids limit, a fresh nosuid `/tmp`. Claude and Codex never
   share auth or config volumes.
+- **Access-gated secrets.** Credentials defined with `aibox secret add` are
+  encrypted at rest and mounted read-only at `/creds`. The container holds only
+  ciphertext until you run `aibox secret allow-access` (a bounded, foreground
+  grant); the master key never enters the mount. An agent cannot self-grant.
+- **Host-shared scratch.** `/ephemeral` is a read-write directory shared with
+  the host but outside the repo, wiped clean at every start — the drop point for
+  a script the agent writes and you run on the host. `aibox ephemeral` reaches
+  it from the host.
 - **Environment notes.** The agent gets `ainotes` (also `/run/aibox/ainotes.md`)
-  describing the tools, the network policy, and the write constraints, so it
-  plans around them instead of discovering them by failure. aibox also creates
-  a `CLAUDE.md` / `AGENTS.md` referencing the notes if the repo has none.
+  describing the tools, the network policy, the secret/scratch conventions, and
+  the write constraints, so it plans around them instead of discovering them by
+  failure. aibox also creates a `CLAUDE.md` / `AGENTS.md` referencing the notes
+  if the repo has none.
 
 ## Command surface
 
@@ -105,6 +114,12 @@ aibox ephemeral [shell | clear] [--json]  the /ephemeral scratch mount shared
                                           bare form prints the host path for
                                           cd "$(aibox ephemeral)"
 
+aibox secret add NAME                      encrypted credentials at /creds (value
+aibox secret list [--json] | delete NAME   read from a prompt/stdin, never argv)
+aibox secret allow-access [--ttl 10m]      temporarily expose the passphrase so
+aibox secret revoke-access                 the container can decrypt; rotate-key
+aibox secret rotate-key                    re-encrypts all after a leak
+
 aibox notes [--size | --claude-md]        the environment notes
 aibox notes project init                  scaffold .aibox/ainotes.md
 aibox handoff [--diff | --clear]          print HANDOFF.md + the git commands
@@ -137,6 +152,32 @@ services:
 Inside the container the agent reaches these by name (`ssh switch1`); the
 listener port is the destination, so it cannot be redirected. `aibox relay
 list` shows the mapping.
+
+## Secrets
+
+Credentials are encrypted on the host and mounted read-only at `/creds`; the
+container only ever holds ciphertext until you deliberately open a grant.
+
+```bash
+printf 'ghp_xxx' | aibox secret add github-token   # or type at a hidden prompt
+aibox secret list
+
+# in a second terminal, while the agent needs it:
+aibox secret allow-access --ttl 5m                 # exposes the passphrase, then
+                                                   # auto-revokes (or Ctrl-C)
+```
+
+Inside the container the agent reads a secret **only** into a variable, never
+onto the terminal or into a file:
+
+```bash
+export TOKEN="$(creds get github-token)"           # fails loudly if not granted
+```
+
+The master key is auto-generated and never enters the mount; an agent cannot
+grant its own access. If a secret is ever exposed, rotate everything with
+`aibox secret rotate-key`. Encryption is `openssl enc`-compatible
+(AES-256-CBC + PBKDF2), so the in-container helper is just the bundled openssl.
 
 Install from source needs Go ≥ 1.25 and rootless [podman](https://podman.io);
 `make` builds `./aibox`, `make install` copies it to `~/.local/bin`
