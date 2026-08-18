@@ -94,6 +94,36 @@ func FragmentPath(name string) string {
 	return filepath.Join(ConfigDir(), name+".acl")
 }
 
+// ResetFragments restores the shipped defaults: it overwrites the base and
+// enabled-assistant fragments from the embedded allowlists (discarding any
+// hand edits) and deletes every project-*.acl (discarding every `aibox egress
+// allow` addition). Returns the number of project fragments removed. Config
+// (.aibox.yaml egress.allowlist) is untouched — reset never edits the user's
+// yaml. Because one squid serves all projects, this is a global reset.
+func ResetFragments(enabledAssistants []string) (int, error) {
+	if err := os.MkdirAll(ConfigDir(), 0o755); err != nil {
+		return 0, err
+	}
+	if err := os.WriteFile(FragmentPath("base"), assets.Read("allowlists/base.txt"), 0o644); err != nil {
+		return 0, err
+	}
+	for _, a := range enabledAssistants {
+		switch a {
+		case "claude", "codex":
+			if err := os.WriteFile(FragmentPath(a), assets.Read("allowlists/"+a+".txt"), 0o644); err != nil {
+				return 0, err
+			}
+		}
+	}
+	removed := ProjectFragments()
+	for _, pf := range removed {
+		if err := os.Remove(pf); err != nil && !os.IsNotExist(err) {
+			return 0, err
+		}
+	}
+	return len(removed), nil
+}
+
 // GeneratedPath is the composed allowlist squid actually reads. Never edited
 // by hand — it is overwritten on every reload.
 func GeneratedPath() string { return filepath.Join(ConfigDir(), "generated.acl") }

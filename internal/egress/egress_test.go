@@ -170,6 +170,41 @@ func TestCompose(t *testing.T) {
 	}
 }
 
+func TestResetFragments(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	if err := EnsureFragments([]string{"claude"}); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate customisation: a hand edit to base and two project additions.
+	if err := os.WriteFile(FragmentPath("base"), []byte("only-this.example.com\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(FragmentPath("project-aaa"), []byte("added-a.example.com\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(FragmentPath("project-bbb"), []byte("added-b.example.com\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := ResetFragments([]string{"claude"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Errorf("reset removed %d project fragments, want 2", n)
+	}
+	// base is back to the shipped default (which contains the anthropic API).
+	base, _ := os.ReadFile(FragmentPath("base"))
+	if strings.Contains(string(base), "only-this.example.com") || !strings.Contains(string(base), "proxy.golang.org") {
+		t.Errorf("base not restored to defaults:\n%s", base)
+	}
+	// Project additions are gone.
+	if pf := ProjectFragments(); len(pf) != 0 {
+		t.Errorf("project fragments should be cleared, still have %v", pf)
+	}
+}
+
 func TestComposeRejectsMalformedEntries(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)

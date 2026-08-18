@@ -94,7 +94,10 @@ aibox net up | down | status              stand up/tear down the whole
                                           running
 
 aibox egress start|stop|reload|status     squid, the domain allowlist
-aibox egress allow <domain> | deny <domain>
+aibox egress allow <domain>               add to this project's allowlist
+aibox egress remove <domain>              undo an allow (this project)
+aibox egress deny <domain>                block a base/default domain too
+aibox egress reset                        restore the shipped defaults
 aibox egress denied [--json]              what the allowlist blocked
 aibox egress list                         the composed allowlist
 aibox egress logs [-f] [--layer http|relay]

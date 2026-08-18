@@ -323,46 +323,49 @@ func cmdEgress(ctx context.Context, p *output.Printer, rt *runtime.Podman, args 
 			}
 		}
 		return nil
+	case "remove":
+		// The inverse of `allow`: drop a domain the user added, from this
+		// project's fragment only. (To block a base/default domain instead,
+		// use `deny`.)
+		if len(args) == 0 {
+			return fmt.Errorf("egress remove needs at least one domain")
+		}
+		removed, err := removeFromFragment(egress.FragmentPath("project-"+projectID), args, p)
+		if err != nil {
+			return err
+		}
+		if !removed {
+			p.Info("nothing removed — %s is not among this project's 'aibox egress allow' additions (a base/default domain is blocked with 'aibox egress deny')", strings.Join(args, ", "))
+			return nil
+		}
+		return m.reloadIfRunning(ctx)
 	case "deny":
 		if len(args) == 0 {
 			return fmt.Errorf("egress deny needs at least one domain")
 		}
-		fragments := append([]string{"base", "project-" + projectID}, m.enabledAssistants()...)
+		// Remove from every fragment, including the shipped base/assistant
+		// defaults — this is how a default domain gets blocked.
 		removed := false
-		for _, name := range fragments {
-			path := egress.FragmentPath(name)
-			data, err := os.ReadFile(path)
+		for _, name := range append([]string{"base", "project-" + projectID}, m.enabledAssistants()...) {
+			r, err := removeFromFragment(egress.FragmentPath(name), args, p)
 			if err != nil {
-				continue
-			}
-			var kept []string
-			for _, line := range strings.Split(string(data), "\n") {
-				drop := false
-				for _, d := range args {
-					if strings.TrimSpace(line) == d {
-						drop = true
-						removed = true
-						p.Info("removed %s from %s", d, path)
-					}
-				}
-				if !drop {
-					kept = append(kept, line)
-				}
-			}
-			if err := os.WriteFile(path, []byte(strings.Join(kept, "\n")), 0o644); err != nil {
 				return err
 			}
+			removed = removed || r
 		}
 		if !removed {
 			p.Info("nothing removed — the domain(s) were not in any fragment")
 			return nil
 		}
-		if rt.Available() {
-			if running, _ := rt.ContainerRunning(ctx, egress.ProxyName); running {
-				return m.Reload(ctx)
-			}
+		return m.reloadIfRunning(ctx)
+	case "reset":
+		n, err := egress.ResetFragments(m.enabledAssistants())
+		if err != nil {
+			return err
 		}
-		return nil
+		p.Good("reset", "restored the base/assistant allowlists to defaults and cleared %d project addition file(s)", n)
+		p.Info("note: this is a global reset — one squid serves every project. '.aibox.yaml' egress.allowlist is left untouched")
+		return m.reloadIfRunning(ctx)
 	case "list":
 		if err := egress.EnsureFragments(m.enabledAssistants()); err != nil {
 			return err
@@ -515,6 +518,49 @@ func parseLeadingEpoch(s string) float64 {
 		return 0
 	}
 	return v
+}
+
+// removeFromFragment strips exact-match domain lines from one fragment file,
+// preserving comments and other entries. Reports whether anything was removed.
+func removeFromFragment(path string, domains []string, p *output.Printer) (bool, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	removed := false
+	var kept []string
+	for _, line := range strings.Split(string(data), "\n") {
+		drop := false
+		for _, d := range domains {
+			if strings.TrimSpace(line) == d {
+				drop = true
+				removed = true
+				p.Info("removed %s from %s", d, path)
+			}
+		}
+		if !drop {
+			kept = append(kept, line)
+		}
+	}
+	if removed {
+		if err := os.WriteFile(path, []byte(strings.Join(kept, "\n")), 0o644); err != nil {
+			return removed, err
+		}
+	}
+	return removed, nil
+}
+
+// reloadIfRunning applies a fragment change to a live proxy (through the
+// `squid -k parse` gate), and is a no-op when the proxy is not running (or
+// podman is absent) — the change lands on the next start.
+func (m *egressManager) reloadIfRunning(ctx context.Context) error {
+	if running, _ := m.rt.ContainerRunning(ctx, egress.ProxyName); running {
+		return m.Reload(ctx)
+	}
+	return nil
 }
 
 func containsLine(content, line string) bool {
