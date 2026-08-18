@@ -273,6 +273,20 @@ func TestRunSpecSeedCreds(t *testing.T) {
 	}
 }
 
+func TestRunSpecSecretsMountReadOnly(t *testing.T) {
+	in := testInputs(t)
+	in.SecretsHostPath = "/home/u/.config/aibox/secrets/exposed"
+	in.SecretsMount = "/creds"
+	argv := argvString(t, in, false)
+	if !strings.Contains(argv, "--volume /home/u/.config/aibox/secrets/exposed:/creds:ro") {
+		t.Errorf("secrets must mount read-only at /creds:\n%s", argv)
+	}
+	// No store configured → no /creds mount.
+	if strings.Contains(argvString(t, testInputs(t), false), ":/creds") {
+		t.Error("/creds mounted without a store")
+	}
+}
+
 func TestRunSpecRelaySeedMounts(t *testing.T) {
 	in := testInputs(t)
 	in.RelaySSHConfigPath = "/tmp/aibox-relay.x/ssh_config"

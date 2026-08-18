@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# aibox in-container secrets helper. Secrets live under /creds as encrypted,
+# read-only files (NAME.enc); the passphrase that decrypts them is present at
+# /creds/passphrase ONLY while the user has run 'aibox secret allow-access' on
+# the host.
+#
+#   creds list            list the available secret names
+#   creds get NAME        decrypt NAME to stdout (for capture into a variable)
+#   creds NAME            shorthand for 'creds get NAME'
+#
+# Capture into an environment variable, never onto the terminal or into a file:
+#   export TOKEN="$(creds get github-token)"
+# A secret must never be printed, logged, committed, or sent in cleartext.
+set -euo pipefail
+
+CREDS_DIR="${AIBOX_CREDS_DIR:-/creds}"
+PASS="$CREDS_DIR/passphrase"
+
+usage() { echo "usage: creds list | creds get NAME" >&2; exit 2; }
+
+cmd="${1:-}"
+case "$cmd" in
+    ""|-h|--help)
+        usage
+        ;;
+    list)
+        found=0
+        for f in "$CREDS_DIR"/*.enc; do
+            [ -e "$f" ] || continue
+            found=1
+            b="${f##*/}"; printf '%s\n' "${b%.enc}"
+        done
+        [ "$found" = 1 ] || echo "creds: no secrets are provisioned" >&2
+        exit 0
+        ;;
+    get)
+        [ "$#" -eq 2 ] || usage
+        name="$2"
+        ;;
+    *)
+        name="$cmd"
+        ;;
+esac
+
+f="$CREDS_DIR/$name.enc"
+if [ ! -f "$f" ]; then
+    echo "creds: no secret named '$name' (try 'creds list')" >&2
+    exit 1
+fi
+if [ ! -f "$PASS" ]; then
+    echo "creds: access is not granted — ask the user to run 'aibox secret allow-access' on the host. Do NOT try to work around this." >&2
+    exit 3
+fi
+# Exactly the format 'aibox secret add' writes (see internal/secret).
+openssl enc -d -a -aes-256-cbc -pbkdf2 -iter 10000 -md sha256 \
+    -pass "file:$PASS" -in "$f"

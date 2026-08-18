@@ -18,6 +18,7 @@ import (
 	"github.com/scuq/aibox/internal/project"
 	"github.com/scuq/aibox/internal/relay"
 	"github.com/scuq/aibox/internal/runtime"
+	"github.com/scuq/aibox/internal/secret"
 )
 
 func cmdDevcontainer(ctx context.Context, p *output.Printer, rt *runtime.Podman, args []string) error {
@@ -151,6 +152,12 @@ func devcontainerCreate(p *output.Printer, args []string) error {
 	if cfg.Ephemeral.Enabled {
 		opts.EphemeralHostPath = project.EphemeralDir(projectID)
 		opts.EphemeralMount = cfg.Ephemeral.Mount
+	}
+	if cfg.Secrets.Enabled {
+		if st, err := os.Stat(secret.ExposedDir()); err == nil && st.IsDir() {
+			opts.SecretsHostPath = secret.ExposedDir()
+			opts.SecretsMount = cfg.Secrets.Mount
+		}
 	}
 	content, err := devcontainer.Generate(opts)
 	if err != nil {

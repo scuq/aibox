@@ -19,6 +19,7 @@ import (
 	"github.com/scuq/aibox/internal/project"
 	"github.com/scuq/aibox/internal/relay"
 	"github.com/scuq/aibox/internal/runtime"
+	"github.com/scuq/aibox/internal/secret"
 	"golang.org/x/term"
 )
 
@@ -178,6 +179,11 @@ type sessionInputs struct {
 	// the container. Empty when disabled.
 	EphemeralHostPath string
 	EphemeralMount    string
+
+	// SecretsHostPath / SecretsMount wire the encrypted secret store in
+	// read-only at /creds. Empty when disabled or no store exists.
+	SecretsHostPath string
+	SecretsMount    string
 }
 
 // composeSpec is the pure heart of `aibox run`: resolved inputs go in, the
@@ -207,6 +213,13 @@ func composeSpec(in sessionInputs) (*container.Spec, error) {
 	if in.EphemeralHostPath != "" {
 		mounts = append(mounts, container.Mount{
 			Type: container.MountBind, Source: in.EphemeralHostPath, Dest: in.EphemeralMount,
+		})
+	}
+	// The encrypted secret store, read-only. Only ciphertext lives here unless
+	// the user has granted access; the master key is never in this directory.
+	if in.SecretsHostPath != "" {
+		mounts = append(mounts, container.Mount{
+			Type: container.MountBind, Source: in.SecretsHostPath, Dest: in.SecretsMount, Options: []string{"ro"},
 		})
 	}
 	mounts = append(mounts, in.GitMounts.Mounts...)
@@ -440,6 +453,14 @@ func cmdRun(ctx context.Context, p *output.Printer, rt *runtime.Podman, args []s
 	if cfg.Ephemeral.Enabled {
 		in.EphemeralHostPath = project.EphemeralDir(projectID)
 		in.EphemeralMount = cfg.Ephemeral.Mount
+	}
+	// Mount the secret store only when it actually exists, so a plain setup
+	// with no secrets gets no /creds at all.
+	if cfg.Secrets.Enabled {
+		if st, err := os.Stat(secret.ExposedDir()); err == nil && st.IsDir() {
+			in.SecretsHostPath = secret.ExposedDir()
+			in.SecretsMount = cfg.Secrets.Mount
+		}
 	}
 
 	if o.seedCreds {

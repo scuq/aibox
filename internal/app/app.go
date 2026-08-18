@@ -47,6 +47,12 @@ COMMANDS
                       (cd "$(aibox ephemeral)"); shell opens a shell there,
                       clear empties it. Shared with the container, outside the
                       git repo — a drop point for scripts run on the host
+    secret <sub>      Encrypted credentials mounted read-only at /creds:
+                      add NAME (value from a prompt/stdin) | list | delete NAME
+                      | allow-access [--ttl] temporarily expose the passphrase
+                      so the container can decrypt | revoke-access | rotate-key.
+                      Encrypted at rest; the container gets ciphertext until you
+                      allow access
     notes             Print the environment notes (--size | --claude-md |
                       project init). Inside the container: 'ainotes'
     handoff           Print the session's HANDOFF.md and the exact git commands
@@ -130,6 +136,8 @@ func Main(args []string) int {
 		err = cmdDevcontainer(ctx, p, rt, args[1:])
 	case "ephemeral":
 		err = cmdEphemeral(p, args[1:])
+	case "secret":
+		err = cmdSecret(ctx, p, args[1:])
 	case "notes":
 		err = cmdNotes(ctx, p, rt, args[1:])
 	case "handoff":

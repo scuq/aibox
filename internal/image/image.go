@@ -41,7 +41,7 @@ func Ref(cfg config.Config) string {
 func RecipeHash(cfg config.Config) string {
 	h := sha256.New()
 	for _, name := range []string{
-		"Containerfile", "entrypoint.sh", "git-shim.sh", "gitconfig",
+		"Containerfile", "entrypoint.sh", "git-shim.sh", "gitconfig", "creds",
 		"ainotes/generate-image-notes.sh", "ainotes/ainotes",
 	} {
 		h.Write(assets.Read(name))
@@ -108,6 +108,7 @@ func WriteContext(dir string, caCertsPath string) error {
 		"entrypoint.sh":                   0o755,
 		"git-shim.sh":                     0o755,
 		"gitconfig":                       0o644,
+		"creds":                           0o755,
 		"ainotes/generate-image-notes.sh": 0o755,
 		"ainotes/ainotes":                 0o755,
 	}

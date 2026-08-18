@@ -88,6 +88,17 @@ to start them here — print the commands and hand them to the user to run on
 the host, e.g.:
     podman run -d --name pg -e POSTGRES_PASSWORD=dev -p 5432:5432 postgres:16
 
+## /creds — secrets (encrypted, access-gated)
+Credentials are at /creds as encrypted, read-only files (NAME.enc). They are
+useless without a passphrase the user exposes only by running, on the host,
+'aibox secret allow-access'. Read one ONLY into an env var, never onto the
+terminal or into a file:  export TOKEN="\$(creds get NAME)"  ('creds list'
+shows names). If access is not granted, 'creds get' fails — ask the user to
+grant it; do NOT work around it. NEVER print, log, echo, commit, write into a
+test, script or /ephemeral, or send a secret in cleartext. If a secret is ever
+exposed by any means, STOP, tell the user it is compromised, and have them
+rotate it with 'aibox secret rotate-key' before continuing.
+
 ## /ephemeral — scratch shared with the host
 /ephemeral is a read-write directory shared with the host and OUTSIDE the git
 repo; nothing in it is part of the project. Use it to hand work to the host:
@@ -118,11 +129,11 @@ EOF
 
 # The budget gate. The full notes (image + policy + project) land in the
 # agent's context every session — a recurring token cost, not free
-# documentation. 5120 bytes total; the image layer gets 4096, leaving room for
+# documentation. 6144 bytes total; the image layer gets 5120, leaving room for
 # the run-time policy section and a short project layer. Exceeding it fails
 # the image build, here, loudly.
 size="$(wc -c < "$SHARE/ainotes-image.md")"
-if [ "$size" -gt 4096 ]; then
-    echo "ainotes image layer is $size bytes (budget 4096) — trim it" >&2
+if [ "$size" -gt 5120 ]; then
+    echo "ainotes image layer is $size bytes (budget 5120) — trim it" >&2
     exit 1
 fi

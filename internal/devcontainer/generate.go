@@ -43,6 +43,11 @@ type Options struct {
 	// the devcontainer. Empty when disabled.
 	EphemeralHostPath string
 	EphemeralMount    string
+
+	// SecretsHostPath / SecretsMount wire the encrypted secret store in
+	// read-only at /creds. Empty when disabled or no store exists.
+	SecretsHostPath string
+	SecretsMount    string
 }
 
 // Name is the devcontainer's display name.
@@ -141,6 +146,11 @@ func Generate(o Options) (string, error) {
 	if o.EphemeralHostPath != "" {
 		mounts = append(mounts, container.Mount{
 			Type: container.MountBind, Source: o.EphemeralHostPath, Dest: o.EphemeralMount,
+		})
+	}
+	if o.SecretsHostPath != "" {
+		mounts = append(mounts, container.Mount{
+			Type: container.MountBind, Source: o.SecretsHostPath, Dest: o.SecretsMount, Options: []string{"ro"},
 		})
 	}
 	mounts = append(mounts, o.GitMounts.Mounts...)

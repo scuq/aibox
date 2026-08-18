@@ -11,7 +11,7 @@ import "embed"
 // --volume mount strings; mounts are rendered only by
 // internal/container.Mount.Render (see that type for the bug this prevents).
 //
-//go:embed Containerfile entrypoint.sh git-shim.sh gitconfig squid.conf.tmpl allowlists ainotes
+//go:embed Containerfile entrypoint.sh git-shim.sh gitconfig creds squid.conf.tmpl allowlists ainotes
 var FS embed.FS
 
 // Read returns one embedded file's contents; unknown names are a programmer

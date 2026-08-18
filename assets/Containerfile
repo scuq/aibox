@@ -312,6 +312,12 @@ RUN mkdir -p /work /vscode \
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod 0755 /usr/local/bin/entrypoint.sh
 
+# The in-container secrets helper: decrypts /creds/<name>.enc with the
+# passphrase the host exposes only during 'aibox secret allow-access'. Uses
+# nothing but the openssl already installed.
+COPY creds /usr/local/bin/creds
+RUN chmod 0755 /usr/local/bin/creds
+
 # The image manifest and the image layer of the environment notes, generated
 # from the tools actually installed above so they can never drift from
 # reality, and gated against the notes' byte budget — an over-budget notes

@@ -25,6 +25,7 @@ type Config struct {
 	Devcontainer DevcontainerConfig `yaml:"devcontainer"`
 	Notes        NotesConfig        `yaml:"notes"`
 	Ephemeral    EphemeralConfig    `yaml:"ephemeral"`
+	Secrets      SecretsConfig      `yaml:"secrets"`
 
 	// Services are named TCP (or best-effort UDP) endpoints reachable through
 	// the relay sidecar (§8). The container is granted named services, not
@@ -176,6 +177,14 @@ type EphemeralConfig struct {
 	Mount   string `yaml:"mount"` // in-container path, default /ephemeral
 }
 
+// SecretsConfig controls the encrypted /creds mount. The store is always
+// encrypted at rest; the passphrase is exposed only during an explicit
+// `aibox secret allow-access`, so mounting the store read-only is safe.
+type SecretsConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	Mount   string `yaml:"mount"` // in-container path, default /creds
+}
+
 type NotesConfig struct {
 	// Project is the repo's own ainotes layer, concatenated after the image
 	// and policy layers so a repo can add conventions but not delete policy.
@@ -222,15 +231,19 @@ func Defaults() Config {
 			Enabled: true,
 			Mount:   "/ephemeral",
 		},
+		Secrets: SecretsConfig{
+			Enabled: true,
+			Mount:   "/creds",
+		},
 		Notes: NotesConfig{
 			Project: ".aibox/ainotes.md",
-			// 5 KB: the notes carry the tool inventory, the egress/relay
+			// 6 KB: the notes carry the tool inventory, the egress/relay
 			// model, the host-hand-off guidance (containers, git push,
-			// allowlisting, the /ephemeral scratch drop point) and the
-			// changelog/release convention — the things an agent most often
-			// gets wrong here. Still a hard cap enforced at image build; plan
-			// open-question #5.
-			MaxBytes: 5120,
+			// allowlisting, the /ephemeral scratch drop point), the encrypted
+			// /creds secret discipline, and the changelog/release convention —
+			// the things an agent most often gets wrong here. Still a hard cap
+			// enforced at image build; plan open-question #5.
+			MaxBytes: 6144,
 		},
 	}
 }
@@ -272,6 +285,12 @@ func (c *Config) Validate() error {
 		m := c.Ephemeral.Mount
 		if m == "" || m[0] != '/' || m == "/" || m == "/work" {
 			return fmt.Errorf("ephemeral.mount %q must be an absolute path other than / or /work", m)
+		}
+	}
+	if c.Secrets.Enabled {
+		m := c.Secrets.Mount
+		if m == "" || m[0] != '/' || m == "/" || m == "/work" {
+			return fmt.Errorf("secrets.mount %q must be an absolute path other than / or /work", m)
 		}
 	}
 	if len(c.Services) > 0 && c.Egress.Mode != "proxy" {
