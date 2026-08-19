@@ -101,6 +101,8 @@ aibox egress reset                        restore the shipped defaults
 aibox egress denied [--json]              what the allowlist blocked
 aibox egress list                         the composed allowlist
 aibox egress logs [-f] [--layer http|relay]
+aibox egress live                         top-style live view: one line per
+                                          destination, running count + verdict
 
 aibox relay start|stop|restart|status     the named-service relay (§8)
 aibox relay list [--json]                 configured services and their ports

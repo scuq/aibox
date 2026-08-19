@@ -170,6 +170,38 @@ func TestCompose(t *testing.T) {
 	}
 }
 
+func TestParseAccess(t *testing.T) {
+	cases := []struct {
+		line       string
+		wantHost   string
+		wantDenied bool
+		wantOK     bool
+	}{
+		// CONNECT (HTTPS), allowed — host:port, port stripped.
+		{"1723400000.123 5000 10.199.0.10 TCP_TUNNEL/200 5678 CONNECT api.anthropic.com:443 - HIER_DIRECT/1.2.3.4 -", "api.anthropic.com", false, true},
+		// CONNECT denied.
+		{"1723400000.500 0 10.199.0.10 TCP_DENIED/403 0 CONNECT blocked.example.com:443 - HIER_NONE/- text/html", "blocked.example.com", true, true},
+		// Plain HTTP, allowed — scheme and path stripped.
+		{"1723400001.000 12 10.199.0.10 TCP_MISS/200 900 GET http://proxy.golang.org/x/mod/@v/list - HIER_DIRECT/9.9.9.9 text/plain", "proxy.golang.org", false, true},
+		// Non-standard port survives host extraction.
+		{"1723400002.000 12 10.199.0.10 TCP_MISS/200 900 GET http://registry.internal:5000/v2/ - HIER_DIRECT/9.9.9.9 text/plain", "registry.internal", false, true},
+		// squid cache.log line (date-prefixed) is not an access line.
+		{"2026/08/19 12:00:00| Accepting HTTP Socket connections at ...", "", false, false},
+		{"", "", false, false},
+	}
+	for _, c := range cases {
+		host, denied, ok := ParseAccess(c.line)
+		if host != c.wantHost || denied != c.wantDenied || ok != c.wantOK {
+			t.Errorf("ParseAccess(%q) = (%q,%v,%v), want (%q,%v,%v)", c.line, host, denied, ok, c.wantHost, c.wantDenied, c.wantOK)
+		}
+	}
+	// ParseDenied is built on ParseAccess: only the denied lines, counted.
+	logs := cases[0].line + "\n" + cases[1].line + "\n" + cases[1].line
+	if d := ParseDenied(logs); d["blocked.example.com"] != 2 || len(d) != 1 {
+		t.Errorf("ParseDenied = %v", d)
+	}
+}
+
 func TestResetFragments(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
@@ -233,7 +265,9 @@ func TestParseDenied(t *testing.T) {
 	if _, ok := counts["api.anthropic.com"]; ok {
 		t.Error("an allowed request was counted as denied")
 	}
-	if counts["http://plain.example.com/x"] != 1 {
-		t.Errorf("plain-http denial missing: %v", counts)
+	// Plain-HTTP denials are normalised to the bare host (scheme/path stripped),
+	// the same shape you would pass to 'aibox egress allow'.
+	if counts["plain.example.com"] != 1 {
+		t.Errorf("plain-http denial missing or not normalised: %v", counts)
 	}
 }

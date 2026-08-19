@@ -1,11 +1,13 @@
 package runtime
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strconv"
@@ -190,6 +192,29 @@ func (p *Podman) Logs(ctx context.Context, name string, tail int) (string, error
 		return "", fmt.Errorf("podman logs %s: %w", name, err)
 	}
 	return buf.String(), nil
+}
+
+// FollowLogs streams `podman logs -f` for a container, calling onLine for each
+// line until ctx is cancelled or the stream ends. stdout and stderr are merged
+// because podman may deliver container output on either stream depending on the
+// log driver. tail is the number of existing lines to replay first (0 = only
+// new lines).
+func (p *Podman) FollowLogs(ctx context.Context, name string, tail int, onLine func(string)) error {
+	args := []string{"logs", "-f", "--tail", strconv.Itoa(tail), name}
+	cmd := exec.CommandContext(ctx, p.exe(), args...)
+	pr, pw := io.Pipe()
+	cmd.Stdout = pw
+	cmd.Stderr = pw
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("podman logs -f %s: %w", name, err)
+	}
+	go func() { _ = cmd.Wait(); _ = pw.Close() }()
+	sc := bufio.NewScanner(pr)
+	sc.Buffer(make([]byte, 64*1024), 1024*1024)
+	for sc.Scan() {
+		onLine(sc.Text())
+	}
+	return nil
 }
 
 func (p *Podman) Kill(ctx context.Context, name string, signal string) error {

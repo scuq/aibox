@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"text/template"
 
@@ -280,16 +281,43 @@ func Entries(path string) int {
 func ParseDenied(logs string) map[string]int {
 	counts := map[string]int{}
 	for _, line := range strings.Split(logs, "\n") {
-		fields := strings.Fields(line)
-		// squid native log: time elapsed client action/code size method URL ...
-		if len(fields) < 7 || !strings.Contains(fields[3], "DENIED") {
-			continue
+		if host, denied, ok := ParseAccess(line); ok && denied {
+			counts[host]++
 		}
-		u := fields[6]
-		if i := strings.LastIndex(u, ":"); i > 0 && !strings.Contains(u[i:], "/") {
-			u = u[:i] // strip :port from CONNECT host:port
-		}
-		counts[u]++
 	}
 	return counts
+}
+
+// ParseAccess extracts the destination host and allow/deny verdict from one
+// squid native access-log line (time elapsed client action/code size method
+// URL …). ok is false for anything that is not an access line — squid's own
+// cache.log chatter, blank lines — so callers can aggregate cleanly.
+func ParseAccess(line string) (host string, denied, ok bool) {
+	fields := strings.Fields(line)
+	if len(fields) < 7 {
+		return "", false, false
+	}
+	// The access log begins with an epoch timestamp (1723400000.123); cache.log
+	// begins with a date (2026/08/19), so this cleanly rejects the latter.
+	if _, err := strconv.ParseFloat(fields[0], 64); err != nil {
+		return "", false, false
+	}
+	if !strings.Contains(fields[3], "/") {
+		return "", false, false
+	}
+	denied = strings.Contains(fields[3], "DENIED")
+	u := fields[6]
+	if i := strings.Index(u, "://"); i >= 0 { // http://host/path → host/path
+		u = u[i+3:]
+	}
+	if i := strings.IndexByte(u, '/'); i >= 0 { // host/path → host
+		u = u[:i]
+	}
+	if i := strings.LastIndex(u, ":"); i > 0 { // host:port → host (CONNECT)
+		u = u[:i]
+	}
+	if u == "" {
+		return "", false, false
+	}
+	return u, denied, true
 }

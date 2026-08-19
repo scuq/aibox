@@ -5,8 +5,12 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"sort"
 	"strings"
+	"sync"
+	"syscall"
+	"time"
 
 	"github.com/scuq/aibox/internal/config"
 	"github.com/scuq/aibox/internal/container"
@@ -14,6 +18,7 @@ import (
 	"github.com/scuq/aibox/internal/output"
 	"github.com/scuq/aibox/internal/project"
 	"github.com/scuq/aibox/internal/runtime"
+	"golang.org/x/term"
 )
 
 // egressManager wires the egress package to a runtime for one configuration.
@@ -418,6 +423,14 @@ func cmdEgress(ctx context.Context, p *output.Printer, rt *runtime.Podman, args 
 			return err
 		}
 		return egressLogs(ctx, p, rt, *layer, *follow)
+	case "live":
+		if err := requirePodman(); err != nil {
+			return err
+		}
+		if exists, _ := rt.ContainerExists(ctx, egress.ProxyName); !exists {
+			return fmt.Errorf("the egress proxy has not run yet — start a session with --egress proxy first")
+		}
+		return egressLive(ctx, rt)
 	default:
 		return fmt.Errorf("unknown egress subcommand %q (status | start | stop | reload | allow <domain..> | deny <domain..> | list | denied | logs [-f])", sub)
 	}
@@ -518,6 +531,102 @@ func parseLeadingEpoch(s string) float64 {
 		return 0
 	}
 	return v
+}
+
+// egressLive is a top-style view of the proxy's traffic: one line per
+// destination with a running request count and its allow/deny verdict, redrawn
+// as new requests arrive. It seeds from the recent log so it starts populated,
+// then follows. Ctrl-C exits.
+func egressLive(ctx context.Context, rt *runtime.Podman) error {
+	type stat struct {
+		count      int
+		lastDenied bool
+	}
+	var mu sync.Mutex
+	stats := map[string]*stat{}
+	total := 0
+	bump := func(line string) {
+		host, denied, ok := egress.ParseAccess(line)
+		if !ok {
+			return
+		}
+		mu.Lock()
+		s := stats[host]
+		if s == nil {
+			s = &stat{}
+			stats[host] = s
+		}
+		s.count++
+		s.lastDenied = denied
+		total++
+		mu.Unlock()
+	}
+
+	// Seed with the recent history so the "top destinations" are there at once.
+	if seed, err := rt.Logs(ctx, egress.ProxyName, 5000); err == nil {
+		for _, line := range strings.Split(seed, "\n") {
+			bump(line)
+		}
+	}
+
+	sigCtx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	go func() { _ = rt.FollowLogs(sigCtx, egress.ProxyName, 0, bump) }()
+
+	color := term.IsTerminal(int(os.Stdout.Fd()))
+	render := func() {
+		type row struct {
+			host   string
+			count  int
+			denied bool
+		}
+		mu.Lock()
+		rows := make([]row, 0, len(stats))
+		for h, s := range stats {
+			rows = append(rows, row{h, s.count, s.lastDenied})
+		}
+		t := total
+		mu.Unlock()
+		sort.Slice(rows, func(i, j int) bool {
+			if rows[i].count != rows[j].count {
+				return rows[i].count > rows[j].count
+			}
+			return rows[i].host < rows[j].host
+		})
+		var b strings.Builder
+		b.WriteString("\033[2J\033[H") // clear screen, cursor home
+		fmt.Fprintf(&b, "aibox egress live — %d requests, %d destinations   (Ctrl-C to exit)\n\n", t, len(rows))
+		fmt.Fprintf(&b, "  %8s  %-6s  %s\n", "COUNT", "STATUS", "DESTINATION")
+		const maxRows = 40
+		for i, r := range rows {
+			if i >= maxRows {
+				fmt.Fprintf(&b, "  … and %d more destination(s)\n", len(rows)-maxRows)
+				break
+			}
+			status, pre, post := "allow", "", ""
+			if r.denied {
+				status = "DENY"
+				if color {
+					pre, post = "\033[31m", "\033[0m"
+				}
+			}
+			fmt.Fprintf(&b, "  %s%8d  %-6s  %s%s\n", pre, r.count, status, r.host, post)
+		}
+		fmt.Print(b.String())
+	}
+
+	render()
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-sigCtx.Done():
+			fmt.Println()
+			return nil
+		case <-ticker.C:
+			render()
+		}
+	}
 }
 
 // removeFromFragment strips exact-match domain lines from one fragment file,
