@@ -43,15 +43,24 @@ func (m *relayManager) writeConfig() error {
 	if err := os.MkdirAll(egress.ConfigDir(), 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(m.configPath(), []byte(relay.HAProxyConfig(m.services)), 0o644)
+	if err := os.WriteFile(m.configPath(), []byte(relay.HAProxyConfig(m.services)), 0o644); err != nil {
+		return err
+	}
+	// The haproxy image runs as its unprivileged haproxy user, which maps to a
+	// subuid under rootless podman — the config must be world-readable.
+	// WriteFile's mode is masked by umask on create and ignored on rewrite, so
+	// enforce it explicitly.
+	return os.Chmod(m.configPath(), 0o644)
 }
 
 // validateConfig gates a (re)start on `haproxy -c -f` — the relay's equivalent
 // of squid's `-k parse` (§8.12): a config that does not parse must not replace
 // a running one.
 func (m *relayManager) validateConfig(ctx context.Context) error {
+	mount := container.Mount{Type: container.MountBind, Source: m.configPath(),
+		Dest: relay.ConfigContainerPath, Options: []string{"ro"}}
 	out, err := runCapture(ctx, m.rt, "run", "--rm",
-		"--volume", m.configPath()+":"+relay.ConfigContainerPath+":ro",
+		"--volume", mount.Render(selinuxEnforcing()),
 		"--entrypoint", "haproxy", m.cfg.Egress.RelayImage,
 		"-c", "-f", relay.ConfigContainerPath)
 	if err != nil {
