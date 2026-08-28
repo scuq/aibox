@@ -26,8 +26,10 @@ const (
 	Name = "aibox-relay"
 	// BasePort is where auto-allocated listener ports start.
 	BasePort = 2200
-	// ConfigContainerPath is where the rendered haproxy.cfg is mounted.
-	ConfigContainerPath = "/etc/haproxy/haproxy.cfg"
+	// ConfigContainerPath is where the rendered haproxy.cfg is mounted: the
+	// official haproxy image's default config path, so the sidecar runs the
+	// image's stock CMD with no command override.
+	ConfigContainerPath = "/usr/local/etc/haproxy/haproxy.cfg"
 )
 
 // RelayIP derives the sidecar's fixed address: host .3 of the internal subnet
