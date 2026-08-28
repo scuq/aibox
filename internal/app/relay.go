@@ -11,6 +11,7 @@ import (
 	"github.com/scuq/aibox/internal/config"
 	"github.com/scuq/aibox/internal/container"
 	"github.com/scuq/aibox/internal/egress"
+	"github.com/scuq/aibox/internal/image"
 	"github.com/scuq/aibox/internal/output"
 	"github.com/scuq/aibox/internal/relay"
 	"github.com/scuq/aibox/internal/runtime"
@@ -54,7 +55,13 @@ func (m *relayManager) validateConfig(ctx context.Context) error {
 		"--entrypoint", "haproxy", m.cfg.Egress.RelayImage,
 		"-c", "-f", relay.ConfigContainerPath)
 	if err != nil {
-		return fmt.Errorf("haproxy rejected the relay configuration:\n%s", strings.TrimSpace(out))
+		// haproxy reports parse errors on stderr, which Capture folds into err;
+		// out is stdout and usually empty here.
+		detail := strings.TrimSpace(out)
+		if detail == "" {
+			detail = err.Error()
+		}
+		return fmt.Errorf("haproxy rejected the relay configuration:\n%s", detail)
 	}
 	return nil
 }
@@ -286,7 +293,7 @@ func relayTest(ctx context.Context, p *output.Printer, rt *runtime.Podman, cfg c
 	// /dev/tcp is enough and needs nothing installed in the relay image.
 	probe := fmt.Sprintf("timeout 5 bash -c '</dev/tcp/%s/%d' && echo OPEN || echo REFUSED", relayIP, svc.Port)
 	out, err := runCapture(ctx, rt, "run", "--rm", "--network", egress.NetInternal,
-		"--entrypoint", "bash", cfg.Image.Reference, "-c", probe)
+		"--entrypoint", "bash", image.Ref(cfg), "-c", probe)
 	out = strings.TrimSpace(out)
 	if strings.Contains(out, "OPEN") {
 		p.Info("%s: listener %s:%d is reachable from inside the network", name, relayIP, svc.Port)
