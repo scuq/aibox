@@ -153,6 +153,11 @@ func devcontainerCreate(p *output.Printer, args []string) error {
 		Fresh:       *fresh,
 		SELinux:     doctor.SELinuxEnforcing(),
 	}
+	for _, a := range selected {
+		if a.Name() == "claude" {
+			opts.ClaudeShareDirs = claudeShareDirs()
+		}
+	}
 	if cfg.Ephemeral.Enabled {
 		opts.EphemeralHostPath = project.EphemeralDir(projectID)
 		opts.EphemeralMount = cfg.Ephemeral.Mount

@@ -13,6 +13,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -38,6 +39,11 @@ type Options struct {
 	// container is recreated from the fresh image rather than revived.
 	Fresh   bool
 	SELinux bool
+
+	// ClaudeShareDirs are host directories (~/.claude/skills, ~/.claude/agents)
+	// bind-mounted read-only into the container's Claude config dir. Empty when
+	// absent on the host or Claude is not among the assistants.
+	ClaudeShareDirs []string
 
 	// EphemeralHostPath / EphemeralMount wire the host-shared scratch dir into
 	// the devcontainer. Empty when disabled.
@@ -149,6 +155,15 @@ func Generate(o Options) (string, error) {
 	var mounts []container.Mount
 	for _, a := range o.Assistants {
 		mounts = append(mounts, a.ConfigMounts(o.ProjectID)...)
+	}
+	// Host skills and agents, read-only over the Claude config volume — the
+	// same decision `aibox run` makes.
+	for _, d := range o.ClaudeShareDirs {
+		mounts = append(mounts, container.Mount{
+			Type: container.MountBind, Source: d,
+			Dest:    "/home/aibox/.claude/" + filepath.Base(d),
+			Options: []string{"ro"},
+		})
 	}
 	mounts = append(mounts, container.Mount{
 		Type: container.MountVolume, Source: project.CacheVolumeName, Dest: "/home/aibox/.cache",

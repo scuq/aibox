@@ -175,6 +175,12 @@ type sessionInputs struct {
 	RelaySSHConfigPath string
 	RelayServicesPath  string
 
+	// ClaudeShareDirs are host directories (~/.claude/skills, ~/.claude/agents)
+	// bind-mounted read-only into the container's Claude config dir, so
+	// host-installed skills and agents work inside without copying. Empty when
+	// absent on the host or the assistant is not Claude.
+	ClaudeShareDirs []string
+
 	// EphemeralHostPath / EphemeralMount wire the host-shared scratch dir into
 	// the container. Empty when disabled.
 	EphemeralHostPath string
@@ -205,6 +211,15 @@ func composeSpec(in sessionInputs) (*container.Spec, error) {
 		{Type: container.MountBind, Source: in.Workspace, Dest: "/work", Options: wsOptions},
 	}
 	mounts = append(mounts, in.Assistant.ConfigMounts(in.ProjectID)...)
+	// Host skills and agents, read-only over the config volume: usable inside,
+	// never writable from inside.
+	for _, d := range in.ClaudeShareDirs {
+		mounts = append(mounts, container.Mount{
+			Type: container.MountBind, Source: d,
+			Dest:    "/home/aibox/.claude/" + filepath.Base(d),
+			Options: []string{"ro"},
+		})
+	}
 	mounts = append(mounts, container.Mount{
 		Type: container.MountVolume, Source: project.CacheVolumeName, Dest: "/home/aibox/.cache",
 	})
@@ -450,6 +465,9 @@ func cmdRun(ctx context.Context, p *output.Printer, rt *runtime.Podman, args []s
 		RelaySSHConfigPath: relaySSHPath,
 		RelayServicesPath:  relaySvcPath,
 	}
+	if asst.Name() == "claude" {
+		in.ClaudeShareDirs = claudeShareDirs()
+	}
 	if cfg.Ephemeral.Enabled {
 		in.EphemeralHostPath = project.EphemeralDir(projectID)
 		in.EphemeralMount = cfg.Ephemeral.Mount
@@ -576,6 +594,25 @@ func envOr(name, def string) string {
 func fileNonEmpty(path string) bool {
 	st, err := os.Stat(path)
 	return err == nil && st.Size() > 0
+}
+
+// claudeShareDirs returns the host's ~/.claude/skills and ~/.claude/agents
+// directories, each only when it exists. Shared with the container read-only —
+// unlike settings.json these are not seeded/copied, so a skill edited on the
+// host is current on the next run.
+func claudeShareDirs() []string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, d := range []string{"skills", "agents"} {
+		path := filepath.Join(home, ".claude", d)
+		if st, err := os.Stat(path); err == nil && st.IsDir() {
+			out = append(out, path)
+		}
+	}
+	return out
 }
 
 // hostCredentialsPath expands the assistant's default host credential

@@ -308,6 +308,24 @@ func TestRunSpecRelaySeedMounts(t *testing.T) {
 	}
 }
 
+func TestRunSpecClaudeShareDirsReadOnly(t *testing.T) {
+	in := testInputs(t)
+	in.ClaudeShareDirs = []string{"/home/u/.claude/skills", "/home/u/.claude/agents"}
+	argv := argvString(t, in, false)
+	for _, want := range []string{
+		"--volume /home/u/.claude/skills:/home/aibox/.claude/skills:ro",
+		"--volume /home/u/.claude/agents:/home/aibox/.claude/agents:ro",
+	} {
+		if !strings.Contains(argv, want) {
+			t.Errorf("share dir argv missing %q:\n%s", want, argv)
+		}
+	}
+	// No host dirs → no share mounts.
+	if strings.Contains(argvString(t, testInputs(t), false), ".claude/skills") {
+		t.Error("skills mounted without a host dir")
+	}
+}
+
 func TestRunSpecPassthroughArgs(t *testing.T) {
 	in := testInputs(t)
 	in.Args = []string{"-p", "hello", "--model", "opus"}
