@@ -60,6 +60,13 @@ diff, log, show, blame, grep) works. When a push is needed, do NOT attempt it
 — hand the user the commands to run on the host, e.g.:
     git -C <repo> add -A && git commit -m "…" && git push
 
+## aibox skill and agent (Claude)
+Built in: skill \`aibox\` and agent \`aibox\` (linked into ~/.claude from
+/usr/share/aibox/claude). Load the skill, or delegate to the agent, when: a
+change is ready to commit/push (HANDOFF.md + exact host git commands), a
+secret from /creds is needed, a request/registry/relay fails, or something
+must run on the host. The agent does not write application code.
+
 ## Changelog & releases
 Keep a CHANGELOG.md in the repo root and update it as you work: record every
 notable change under a "## Unreleased" heading. You CAN write CHANGELOG.md —

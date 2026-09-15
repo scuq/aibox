@@ -98,7 +98,7 @@ func TestImageNotesGeneratorRuns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"ansible", "oc ", "lua ", "pwsh ", "bao ", "openssl ", "yq", "expect", "nc ", "skopeo", "paramiko"} {
+	for _, want := range []string{"ansible", "oc ", "lua ", "pwsh ", "bao ", "openssl ", "yq", "expect", "nc ", "skopeo", "paramiko", "skill `aibox`", "agent `aibox`"} {
 		if !strings.Contains(string(imageNotes), want) {
 			t.Errorf("image notes missing %q", want)
 		}
