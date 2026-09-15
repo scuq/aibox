@@ -176,7 +176,8 @@ type sessionInputs struct {
 	RelayServicesPath  string
 
 	// ClaudeShareDirs are host directories (~/.claude/skills, ~/.claude/agents)
-	// bind-mounted read-only into the container's Claude config dir, so
+	// bind-mounted read-only under /run/host-aibox/claude. The entrypoint links
+	// their entries, next to the image's built-in ones, into the config dir, so
 	// host-installed skills and agents work inside without copying. Empty when
 	// absent on the host or the assistant is not Claude.
 	ClaudeShareDirs []string
@@ -211,12 +212,13 @@ func composeSpec(in sessionInputs) (*container.Spec, error) {
 		{Type: container.MountBind, Source: in.Workspace, Dest: "/work", Options: wsOptions},
 	}
 	mounts = append(mounts, in.Assistant.ConfigMounts(in.ProjectID)...)
-	// Host skills and agents, read-only over the config volume: usable inside,
-	// never writable from inside.
+	// Host skills and agents, read-only beside the config volume rather than
+	// over it: claude-links.sh links them into ~/.claude together with the
+	// built-in ones. Never writable from inside.
 	for _, d := range in.ClaudeShareDirs {
 		mounts = append(mounts, container.Mount{
 			Type: container.MountBind, Source: d,
-			Dest:    "/home/aibox/.claude/" + filepath.Base(d),
+			Dest:    "/run/host-aibox/claude/" + filepath.Base(d),
 			Options: []string{"ro"},
 		})
 	}

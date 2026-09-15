@@ -42,6 +42,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3-pip \
         python3-venv \
         python-is-python3 \
+        python3-paramiko \
+        skopeo \
         lua5.4 \
         liblua5.4-dev \
         luarocks \
@@ -63,6 +65,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # even though ca-certificates happens to depend on it today: relying on a
 # transitive dependency for a tool the agent is expected to use is how it
 # silently vanishes in a base-image bump.
+# python3-paramiko comes from apt rather than pip so the system interpreter
+# can import it out of the box without a venv. skopeo inspects and copies
+# images straight to and from registries without a daemon or local storage.
+# It is not a container runtime and does not change the "no podman here" rule.
 
 # Custom CA certificates, e.g. a corporate root or a TLS-inspecting proxy's
 # CA. The build context always contains a ca-certificates/ directory; aibox
@@ -317,6 +323,15 @@ RUN chmod 0755 /usr/local/bin/entrypoint.sh
 # nothing but the openssl already installed.
 COPY creds /usr/local/bin/creds
 RUN chmod 0755 /usr/local/bin/creds
+
+# Built-in Claude skills and agents (the aibox skill: git handoff, /creds,
+# egress, relay). They cannot go into ~/.claude/skills directly: that is the
+# config volume, and the host's own skills must sit next to them. At start,
+# claude-links.sh links these and the host's read-only
+# /run/host-aibox/claude/{skills,agents} into the config dir.
+COPY claude/ /usr/share/aibox/claude/
+COPY claude-links.sh /usr/share/aibox/claude-links.sh
+RUN chmod 0755 /usr/share/aibox/claude-links.sh
 
 # The image manifest and the image layer of the environment notes, generated
 # from the tools actually installed above so they can never drift from

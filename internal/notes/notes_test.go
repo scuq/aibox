@@ -88,7 +88,7 @@ func TestImageNotesGeneratorRuns(t *testing.T) {
 		t.Fatalf("manifest is not valid JSON: %v\n%s", err, manifest)
 	}
 	tools := m["tools"].(map[string]any)
-	for _, want := range []string{"oc", "ansible-core", "ripgrep", "openbao", "openssl"} {
+	for _, want := range []string{"oc", "ansible-core", "ripgrep", "openbao", "openssl", "skopeo"} {
 		if _, ok := tools[want]; !ok {
 			t.Errorf("manifest tools missing %q", want)
 		}
@@ -98,7 +98,7 @@ func TestImageNotesGeneratorRuns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"ansible", "oc ", "lua ", "pwsh ", "bao ", "openssl ", "yq", "expect", "nc "} {
+	for _, want := range []string{"ansible", "oc ", "lua ", "pwsh ", "bao ", "openssl ", "yq", "expect", "nc ", "skopeo", "paramiko"} {
 		if !strings.Contains(string(imageNotes), want) {
 			t.Errorf("image notes missing %q", want)
 		}

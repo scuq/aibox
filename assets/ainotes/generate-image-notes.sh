@@ -31,6 +31,7 @@ PWSH_V="$(ver pwsh --version)"
 BAO_V="$(ver bao --version)"
 OPENSSL_V="$(ver openssl version)"
 YQ_V="$(ver yq --version)"
+SKOPEO_V="$(ver skopeo --version)"
 
 cat > "$SHARE/image-manifest.json" <<EOF
 {
@@ -38,7 +39,7 @@ cat > "$SHARE/image-manifest.json" <<EOF
   "image": { "profile": "${AIBOX_PROFILE:-base}", "release": "${AIBOX_RELEASE:-local}" },
   "toolchains": { "go": "$GO_V", "node": "$NODE_V", "python": "$PYTHON_V", "lua": "$LUA_V", "powershell": "$PWSH_V" },
   "assistants": { "claude": "$CLAUDE_V", "codex": "$CODEX_V" },
-  "tools": { "ripgrep": "$RG_V", "fd": "$FD_V", "bat": "$BAT_V", "yq": "$YQ_V", "oc": "$OC_V", "ansible-core": "$ANSIBLE_V", "openbao": "$BAO_V", "openssl": "$OPENSSL_V" }
+  "tools": { "ripgrep": "$RG_V", "fd": "$FD_V", "bat": "$BAT_V", "yq": "$YQ_V", "oc": "$OC_V", "ansible-core": "$ANSIBLE_V", "openbao": "$BAO_V", "openssl": "$OPENSSL_V", "skopeo": "$SKOPEO_V" }
 }
 EOF
 
@@ -114,12 +115,13 @@ sandbox — never work around the egress policy from inside.
 search  rg  fd  ast-grep     view  bat  tree  less     data  jq  yq(YAML)
 net     curl  nc  openssl  expect                       vcs   git(read-only)
 k8s     oc  kubectl          secrets  bao(OpenBao)       shells bash pwsh lua
+oci     skopeo (registry inspect/copy; no daemon)
 iac     ansible ansible-lint (own venv; galaxy→~/.cache/ansible)
-build   go(gopls,staticcheck,dlv,goimports)  python(uv,ruff,mypy,pytest) node
+build   go(gopls,staticcheck,dlv,goimports)  python(uv,ruff,mypy,pytest,paramiko) node
 arch    tar  bzip2  unzip
 versions: go $GO_V · node $NODE_V · python $PYTHON_V · oc $OC_V · ansible $ANSIBLE_V
 · pwsh $PWSH_V · lua $LUA_V · yq $YQ_V · bao $BAO_V · openssl $OPENSSL_V
-· rg $RG_V · fd $FD_V · bat $BAT_V
+· rg $RG_V · fd $FD_V · bat $BAT_V · skopeo $SKOPEO_V
 Caches under ~/.cache persist across runs; re-downloading is unnecessary.
 
 ## Writable paths

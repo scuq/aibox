@@ -164,6 +164,14 @@ if [ -n "$CONFIG_DIR" ]; then
             install -m 700 /run/host-aibox/statusline-command.sh \
                 "$CONFIG_DIR/statusline-command.sh"
         fi
+
+        # Skills and agents: the image's built-in ones plus the host's
+        # read-only ~/.claude/{skills,agents}, linked into the config dir.
+        # Missing script (host-side tests) is not an error.
+        LINKS="${AIBOX_CLAUDE_LINKS:-/usr/share/aibox/claude-links.sh}"
+        if [ -x "$LINKS" ]; then
+            "$LINKS" "$CONFIG_DIR" || true
+        fi
     fi
 fi
 

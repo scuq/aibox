@@ -72,6 +72,11 @@ func TestContainerfileKeepsItsPins(t *testing.T) {
 		"netcat-openbsd",
 		"expect",
 		"bzip2",
+		"python3-paramiko",
+		// built-in Claude skills/agents and the linker that exposes them
+		"COPY claude/ /usr/share/aibox/claude/",
+		"/usr/share/aibox/claude-links.sh",
+		"skopeo",
 		// custom CA support: the unconditional COPY and the store rebuild,
 		// plus the two variables that make the CA visible to node (claude,
 		// codex) and python's requests

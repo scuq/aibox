@@ -156,12 +156,13 @@ func Generate(o Options) (string, error) {
 	for _, a := range o.Assistants {
 		mounts = append(mounts, a.ConfigMounts(o.ProjectID)...)
 	}
-	// Host skills and agents, read-only over the Claude config volume — the
-	// same decision `aibox run` makes.
+	// Host skills and agents, read-only under /run/host-aibox/claude and
+	// linked into the Claude config volume by postStartCommand — the same
+	// decision `aibox run` makes.
 	for _, d := range o.ClaudeShareDirs {
 		mounts = append(mounts, container.Mount{
 			Type: container.MountBind, Source: d,
-			Dest:    "/home/aibox/.claude/" + filepath.Base(d),
+			Dest:    "/run/host-aibox/claude/" + filepath.Base(d),
 			Options: []string{"ro"},
 		})
 	}
@@ -334,6 +335,11 @@ func postStartCommand(o Options) string {
 		parts = append(parts, fmt.Sprintf(
 			"if [ -s %s ] && [ ! -s %s ]; then install -m 600 %s %s 2>/dev/null || true; fi",
 			src, dst, src, dst))
+		// Built-in and host skills/agents, linked as the entrypoint does.
+		if a.Name() == "claude" {
+			parts = append(parts, fmt.Sprintf(
+				"/usr/share/aibox/claude-links.sh %s 2>/dev/null || true", auth.ConfigDir))
+		}
 	}
 	policy := notes.PolicyLayer(o.Config)
 	b64 := base64.StdEncoding.EncodeToString([]byte(policy))

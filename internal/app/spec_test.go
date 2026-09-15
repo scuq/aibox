@@ -313,15 +313,19 @@ func TestRunSpecClaudeShareDirsReadOnly(t *testing.T) {
 	in.ClaudeShareDirs = []string{"/home/u/.claude/skills", "/home/u/.claude/agents"}
 	argv := argvString(t, in, false)
 	for _, want := range []string{
-		"--volume /home/u/.claude/skills:/home/aibox/.claude/skills:ro",
-		"--volume /home/u/.claude/agents:/home/aibox/.claude/agents:ro",
+		"--volume /home/u/.claude/skills:/run/host-aibox/claude/skills:ro",
+		"--volume /home/u/.claude/agents:/run/host-aibox/claude/agents:ro",
 	} {
 		if !strings.Contains(argv, want) {
 			t.Errorf("share dir argv missing %q:\n%s", want, argv)
 		}
 	}
+	// Never over the config volume: that would hide the built-in skills.
+	if strings.Contains(argv, ":/home/aibox/.claude/skills") {
+		t.Errorf("host skills mounted over the config dir:\n%s", argv)
+	}
 	// No host dirs → no share mounts.
-	if strings.Contains(argvString(t, testInputs(t), false), ".claude/skills") {
+	if strings.Contains(argvString(t, testInputs(t), false), "host-aibox/claude") {
 		t.Error("skills mounted without a host dir")
 	}
 }

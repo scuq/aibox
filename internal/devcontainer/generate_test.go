@@ -125,8 +125,9 @@ func TestGeneratedContent(t *testing.T) {
 		`"postStartCommand"`,
 		"/run/aibox/ainotes.md",
 		".ainotes",
-		"/home/aibox/.claude-auth/.credentials.json", // login seeded from the shared volume
-		"find /ephemeral -mindepth 1 -maxdepth 1",    // wiped each start
+		"/home/aibox/.claude-auth/.credentials.json",           // login seeded from the shared volume
+		"find /ephemeral -mindepth 1 -maxdepth 1",              // wiped each start
+		"/usr/share/aibox/claude-links.sh /home/aibox/.claude", // built-in + host skills linked
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("devcontainer.json missing postStart wiring %q", want)

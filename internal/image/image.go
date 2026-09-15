@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -42,10 +43,19 @@ func RecipeHash(cfg config.Config) string {
 	h := sha256.New()
 	for _, name := range []string{
 		"Containerfile", "entrypoint.sh", "git-shim.sh", "gitconfig", "creds",
-		"ainotes/generate-image-notes.sh", "ainotes/ainotes",
+		"claude-links.sh", "ainotes/generate-image-notes.sh", "ainotes/ainotes",
 	} {
 		h.Write(assets.Read(name))
 	}
+	// Built-in skills and agents are image content too. WalkDir is lexical,
+	// so the hash is deterministic; the name goes in so a rename counts.
+	_ = fs.WalkDir(assets.FS, "claude", func(name string, d fs.DirEntry, err error) error {
+		if err == nil && !d.IsDir() {
+			fmt.Fprintf(h, "asset=%s\n", name)
+			h.Write(assets.Read(name))
+		}
+		return err
+	})
 	fmt.Fprintf(h, "claude=%s\n", assistantVersion(cfg, "claude"))
 	fmt.Fprintf(h, "codex=%s\n", assistantVersion(cfg, "codex"))
 	// Custom CA certificates are image content too: swap the certificate and
@@ -109,8 +119,20 @@ func WriteContext(dir string, caCertsPath string) error {
 		"git-shim.sh":                     0o755,
 		"gitconfig":                       0o644,
 		"creds":                           0o755,
+		"claude-links.sh":                 0o755,
 		"ainotes/generate-image-notes.sh": 0o755,
 		"ainotes/ainotes":                 0o755,
+	}
+	// The built-in Claude skills and agents: the whole tree, so adding one
+	// needs no change here.
+	err := fs.WalkDir(assets.FS, "claude", func(name string, d fs.DirEntry, err error) error {
+		if err == nil && !d.IsDir() {
+			files[name] = 0o644
+		}
+		return err
+	})
+	if err != nil {
+		return fmt.Errorf("cannot write build context: %w", err)
 	}
 	for name, mode := range files {
 		dst := filepath.Join(dir, name)
