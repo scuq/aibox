@@ -26,8 +26,13 @@ func PolicyLayer(cfg config.Config) string {
 	} else {
 		b.WriteString("Egress: OPEN/unfiltered — the Network allowlist guidance above does\nnot apply this session; outbound requests are not proxied.\n")
 	}
-	if cfg.Git.History == "none" {
+	switch cfg.Git.History {
+	case "none":
 		b.WriteString("Git history: unavailable this session (history: none).\n")
+	case "read-only":
+		b.WriteString("Git: .git is READ-ONLY this session (history: read-only) — no git write\nverbs; use the handoff (.aibox/HANDOFF.md + host commands) instead.\n")
+	default:
+		b.WriteString("Git: writable — ask the user before every commit, push or tag (see\nRepository writes).\n")
 	}
 	if len(cfg.Services) > 0 {
 		b.WriteString("Relay services (reach by name, the port is fixed per service):\n")

@@ -28,6 +28,12 @@ ansible-galaxy-ng.s3.dualstack.us-east-1.amazonaws.com
 github.com
 codeload.github.com
 objects.githubusercontent.com
+# gh and glab (the forge CLIs in the image) talk to the APIs; uploads is where
+# `gh release upload` puts assets. A self-hosted GitLab is not covered: allow
+# its host with `aibox egress allow HOST` and set GITLAB_HOST in the session.
+api.github.com
+uploads.github.com
+gitlab.com
 # apt, for --allow-pkg sessions.
 deb.debian.org
 security.debian.org

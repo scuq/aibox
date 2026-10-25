@@ -114,22 +114,29 @@ type RuntimeConfig struct {
 }
 
 type GitConfig struct {
-	// History read-only mounts .git read-only over the writable workspace —
-	// kernel-enforced: no commit, add, push can write. "none" omits the mount
-	// (and masks any .git inside the workspace) for review sessions where the
-	// agent should not read branch names or commit messages at all.
-	History string `yaml:"history"` // read-only | none
-	// Identity is permanently false in aibox: the host ~/.gitconfig is never
-	// mounted, no user identity or credential helper reaches the container.
-	// The field exists so a config file setting it true fails validation
-	// loudly instead of being silently ignored.
+	// History selects the git policy. "read-write" (default) leaves .git
+	// writable: commits and pushes work inside the container, and the
+	// environment notes make them a soft policy — the agent asks the user
+	// before each one. "read-only" mounts .git read-only over the writable
+	// workspace — kernel-enforced: no commit, add, push can write. "none"
+	// omits the mount (and masks any .git inside the workspace) for review
+	// sessions where the agent should not read branch names or commit
+	// messages at all.
+	History string `yaml:"history"` // read-write | read-only | none
+	// Identity forwards the host's git user.name/user.email (as read in the
+	// workspace, so a repo-local identity wins) into the container as the
+	// GIT_AUTHOR_* / GIT_COMMITTER_* variables, so a commit made inside is
+	// the user's. The host ~/.gitconfig itself is never mounted: it carries
+	// credential helpers. false forwards nothing and the agent must ask.
 	Identity bool `yaml:"identity"`
-	// Shim controls the loud git shim on PATH inside the container. "off" is
-	// for debugging the shim itself, nothing else — layer 1 (the read-only
-	// mount) still enforces.
+	// Shim controls the git shim on PATH inside the container. It only acts
+	// under history: read-only, where it turns EROFS into one clear
+	// explanation; "off" is for debugging the shim itself — the read-only
+	// mount still enforces.
 	Shim string `yaml:"shim"` // loud | off
 	// Handoff is the writable directory (relative to /work) where the agent
-	// records what it changed, since it cannot commit.
+	// records what it changed when it does not commit itself (read-only
+	// sessions, or a user who prefers to commit on the host).
 	Handoff string `yaml:"handoff"`
 }
 
@@ -212,9 +219,10 @@ func Defaults() Config {
 			TmpfsSize:     "512m",
 		},
 		Git: GitConfig{
-			History: "read-only",
-			Shim:    "loud",
-			Handoff: ".aibox",
+			History:  "read-write",
+			Identity: true,
+			Shim:     "loud",
+			Handoff:  ".aibox",
 		},
 		Security: SecurityConfig{
 			NoNewPrivileges:  true,
@@ -261,17 +269,14 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("unknown egress mode %q (use: open, proxy)", c.Egress.Mode)
 	}
 	switch c.Git.History {
-	case "read-only", "none":
+	case "read-write", "read-only", "none":
 	default:
-		return fmt.Errorf("unknown git.history %q (use: read-only, none)", c.Git.History)
+		return fmt.Errorf("unknown git.history %q (use: read-write, read-only, none)", c.Git.History)
 	}
 	switch c.Git.Shim {
 	case "loud", "off":
 	default:
 		return fmt.Errorf("unknown git.shim %q (use: loud, off)", c.Git.Shim)
-	}
-	if c.Git.Identity {
-		return fmt.Errorf("git.identity: true is not supported — aibox never mounts the host gitconfig; commits are made by the user on the host")
 	}
 	switch c.Runtime.WorkspaceMode {
 	case "read-write", "read-only":

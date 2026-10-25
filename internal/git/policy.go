@@ -1,6 +1,12 @@
 // Package git implements the host side of the git policy: resolving where the
-// repository's real gitdir lives and turning that into the read-only mounts
-// that make "no git write path inside the container" a kernel fact.
+// repository's real gitdir lives, turning that plus the git.history setting
+// into mounts, and reading the host identity that is forwarded so commits made
+// inside the container carry the user's name.
+//
+// The default mode is read-write: git writes work inside the container and
+// the environment notes make them a soft, ask-first policy. The two stricter
+// modes remain opt-in: read-only (the .git mount is EROFS, the shim explains)
+// and none (.git is masked entirely).
 package git
 
 import (
@@ -116,6 +122,49 @@ func Remotes(workspace string) map[string]string {
 	return remotes
 }
 
+// Identity is the host's git author identity. It is forwarded into the
+// container as the GIT_AUTHOR_* / GIT_COMMITTER_* variables — never by
+// mounting the host ~/.gitconfig, which would carry credential helpers and
+// everything else along with it.
+type Identity struct {
+	Name  string
+	Email string
+}
+
+// ReadIdentity asks git, in the workspace, for user.name and user.email so a
+// repo-local identity wins over the global one exactly as it would on the
+// host. Empty fields when git is unavailable or nothing is configured; the
+// entrypoint tells the agent to ask the user in that case.
+func ReadIdentity(workspace string) Identity {
+	gitPath, err := exec.LookPath("git")
+	if err != nil {
+		return Identity{}
+	}
+	get := func(key string) string {
+		out, err := exec.Command(gitPath, "-C", workspace, "config", "--get", key).Output()
+		if err != nil {
+			return ""
+		}
+		return strings.TrimSpace(string(out))
+	}
+	return Identity{Name: get("user.name"), Email: get("user.email")}
+}
+
+// Env renders the identity as container environment. Nothing when either
+// half is missing: a commit with a name and no email is not an improvement
+// over asking.
+func (id Identity) Env() []container.EnvVar {
+	if id.Name == "" || id.Email == "" {
+		return nil
+	}
+	return []container.EnvVar{
+		{Name: "GIT_AUTHOR_NAME", Value: id.Name},
+		{Name: "GIT_AUTHOR_EMAIL", Value: id.Email},
+		{Name: "GIT_COMMITTER_NAME", Value: id.Name},
+		{Name: "GIT_COMMITTER_EMAIL", Value: id.Email},
+	}
+}
+
 // Mounts is the git policy rendered as mount decisions.
 type Mounts struct {
 	Mounts []container.Mount
@@ -127,6 +176,13 @@ type Mounts struct {
 
 // Plan turns RepoInfo plus the git.history setting into mounts.
 //
+// history "read-write" (the default): .git comes along with the read-write
+// workspace mount and nothing is layered over it, so add, commit, push and
+// the rest work. The only mount this mode adds is for a gitfile (submodule,
+// linked worktree): the real gitdir lies outside the workspace and is mounted
+// at its own path, writable, so the pointer resolves. Whether a write is
+// *appropriate* is the notes' ask-first policy, not the kernel's.
+//
 // history "read-only": the workspace is mounted read-write elsewhere so the
 // agent can edit files; .git is mounted read-only *over* it. `git add` cannot
 // write the index, `commit` cannot write objects or refs, `push` cannot
@@ -135,11 +191,35 @@ type Mounts struct {
 // history "none": the .git inside the workspace is masked instead, for review
 // sessions where the agent should not read branch names or commit messages at
 // all. Masking matters: without it the read-write workspace mount would
-// expose .git writable, which is strictly worse than the default.
+// expose .git writable, which is strictly worse than read-only.
 func Plan(info RepoInfo, history string, workspace string) Mounts {
 	var m Mounts
 
 	switch history {
+	case "read-write":
+		if !info.IsRepo {
+			if info.DotGit != "" && info.DotGitIsFile {
+				m.Warnings = append(m.Warnings, ".git is a gitfile but git is not available on the host to resolve it — history will be unavailable in the container")
+				m.Mounts = append(m.Mounts, container.Mount{
+					Type: container.MountBind, Source: "/dev/null", Dest: "/work/.git",
+					Options: []string{"ro"},
+				})
+				return m
+			}
+			m.Warnings = append(m.Warnings, "workspace is not a git repository — git history will be unavailable in the container")
+			return m
+		}
+		if info.DotGit == "" {
+			m.Warnings = append(m.Warnings, fmt.Sprintf("workspace is not the repository root (repository at %s) — git history will be unavailable in the container", filepath.Dir(info.CommonDir)))
+			return m
+		}
+		if info.DotGitIsFile && info.CommonDir != "" && !strings.HasPrefix(info.CommonDir, workspace+string(filepath.Separator)) {
+			m.Mounts = append(m.Mounts, container.Mount{
+				Type: container.MountBind, Source: info.CommonDir, Dest: info.CommonDir,
+			})
+		}
+		return m
+
 	case "none":
 		if info.DotGit == "" {
 			return m

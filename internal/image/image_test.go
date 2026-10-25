@@ -55,7 +55,8 @@ func TestRecipeHashTracksVersions(t *testing.T) {
 }
 
 func TestContainerfileKeepsItsPins(t *testing.T) {
-	// The Containerfile's downloaded tools (Go, oc, PowerShell) must stay
+	// The Containerfile's downloaded tools (Go, yq, oc, PowerShell, bao, gh,
+	// glab) must stay
 	// pinned with per-arch checksums that fail closed. Losing one of these is
 	// exactly the "someone simplifies a flag back out" failure the plan
 	// warns about.
@@ -66,6 +67,8 @@ func TestContainerfileKeepsItsPins(t *testing.T) {
 		"PWSH_SHA256_AMD64", "PWSH_SHA256_ARM64",
 		"BAO_SHA256_AMD64", "BAO_SHA256_ARM64",
 		"YQ_SHA256_AMD64", "YQ_SHA256_ARM64",
+		"GH_SHA256_AMD64", "GH_SHA256_ARM64",
+		"GLAB_SHA256_AMD64", "GLAB_SHA256_ARM64",
 		// openssl is explicit, not inherited via ca-certificates
 		"openssl",
 		// the nc everyone's examples assume, not the virtual package
@@ -99,10 +102,10 @@ func TestContainerfileKeepsItsPins(t *testing.T) {
 			t.Errorf("Containerfile missing %q", want)
 		}
 	}
-	if got := strings.Count(cf, "sha256sum -c -"); got < 5 {
-		t.Errorf("expected at least 5 checksum gates (go, yq, oc, pwsh, bao), found %d", got)
+	if got := strings.Count(cf, "sha256sum -c -"); got < 7 {
+		t.Errorf("expected at least 7 checksum gates (go, yq, oc, pwsh, bao, gh, glab), found %d", got)
 	}
-	if strings.Count(cf, "exit 1") < 5 {
+	if strings.Count(cf, "exit 1") < 7 {
 		t.Error("unpinned architectures must stop the build for every downloaded tool")
 	}
 }

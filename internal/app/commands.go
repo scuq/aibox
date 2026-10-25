@@ -62,7 +62,8 @@ version: 1
 #   cpus: "4"
 
 # git:
-#   history: read-only   # read-only | none — there is never a git write path
+#   history: read-write  # read-write (ask-first, default) | read-only | none
+#   identity: true       # forward host user.name/user.email as GIT_AUTHOR_*
 
 # egress:
 #   mode: proxy
@@ -184,7 +185,7 @@ func cmdStatus(ctx context.Context, p *output.Printer, rt *runtime.Podman, args 
 	}
 	fmt.Printf("  limits    : memory=%s cpus=%s\n", orNone(cfg.Runtime.Memory), orNone(cfg.Runtime.CPUs))
 	fmt.Printf("  egress    : %s\n", st.Egress)
-	fmt.Printf("  git       : history=%s, no write path (commits happen on the host)\n", cfg.Git.History)
+	fmt.Printf("  git       : history=%s (%s)\n", cfg.Git.History, gitHistorySummary(cfg.Git.History))
 	return nil
 }
 
@@ -383,4 +384,15 @@ func cmdDoctor(ctx context.Context, p *output.Printer, rt *runtime.Podman, args 
 	}
 	fmt.Println("Problems found — see the ✗ lines above.")
 	return 1
+}
+
+// gitHistorySummary is the one-line meaning of a git.history value for status.
+func gitHistorySummary(history string) string {
+	switch history {
+	case "read-only":
+		return "no write path, commits happen on the host"
+	case "none":
+		return ".git masked, no history in the container"
+	}
+	return "writable, the agent asks before every commit and push"
 }

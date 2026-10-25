@@ -176,3 +176,77 @@ func TestPlanEndToEnd(t *testing.T) {
 		t.Fatalf("unexpected plan: %+v", m)
 	}
 }
+
+func TestPlanReadWriteNormalRepoMountsNothing(t *testing.T) {
+	// The default: .git rides along with the writable workspace mount and
+	// nothing is layered over it. No mount, no warning.
+	ws := "/home/u/proj"
+	info := RepoInfo{IsRepo: true, DotGit: ws + "/.git", CommonDir: ws + "/.git"}
+	m := Plan(info, "read-write", ws)
+	if len(m.Mounts) != 0 || len(m.Tmpfs) != 0 {
+		t.Errorf("read-write must add no mounts, got %+v", m)
+	}
+	if len(m.Warnings) != 0 {
+		t.Errorf("unexpected warnings: %v", m.Warnings)
+	}
+}
+
+func TestPlanReadWriteGitfileMountsCommonDirWritable(t *testing.T) {
+	// A linked worktree or submodule still needs its real gitdir inside the
+	// container, now writable, at the path the gitfile points to.
+	ws := "/home/u/proj"
+	info := RepoInfo{IsRepo: true, DotGit: ws + "/.git", DotGitIsFile: true,
+		CommonDir: "/home/u/main/.git/worktrees/proj"}
+	m := Plan(info, "read-write", ws)
+	if len(m.Mounts) != 1 {
+		t.Fatalf("want exactly the common dir mount, got %v", m.Mounts)
+	}
+	got := m.Mounts[0]
+	if got.Source != info.CommonDir || got.Dest != info.CommonDir {
+		t.Errorf("common dir must be mounted at its own path, got %+v", got)
+	}
+	for _, o := range got.Options {
+		if o == "ro" {
+			t.Errorf("read-write mode must not mount the gitdir read-only: %+v", got)
+		}
+	}
+}
+
+func TestPlanReadWriteStillWarns(t *testing.T) {
+	if m := Plan(RepoInfo{}, "read-write", "/w"); len(m.Warnings) != 1 {
+		t.Errorf("non-repo should warn once, got %v", m.Warnings)
+	}
+	m := Plan(RepoInfo{IsRepo: true, CommonDir: "/home/u/repo/.git"}, "read-write", "/home/u/repo/sub")
+	if len(m.Warnings) != 1 || !strings.Contains(m.Warnings[0], "not the repository root") {
+		t.Errorf("want the not-root warning, got %v", m.Warnings)
+	}
+}
+
+func TestIdentityEnv(t *testing.T) {
+	// Half an identity forwards nothing: a commit with a name and no email is
+	// not better than asking.
+	if env := (Identity{Name: "A"}).Env(); env != nil {
+		t.Errorf("incomplete identity must forward nothing, got %v", env)
+	}
+	env := (Identity{Name: "A B", Email: "a@b"}).Env()
+	if len(env) != 4 {
+		t.Fatalf("want the four GIT_* variables, got %v", env)
+	}
+	for _, e := range env {
+		if !strings.HasPrefix(e.Name, "GIT_AUTHOR_") && !strings.HasPrefix(e.Name, "GIT_COMMITTER_") {
+			t.Errorf("unexpected variable %q", e.Name)
+		}
+	}
+}
+
+func TestReadIdentityPrefersRepoLocal(t *testing.T) {
+	requireGit(t)
+	ws := t.TempDir()
+	mustGit(t, ws, "init", "-q")
+	mustGit(t, ws, "config", "user.name", "Local User")
+	mustGit(t, ws, "config", "user.email", "local@example.test")
+	id := ReadIdentity(ws)
+	if id.Name != "Local User" || id.Email != "local@example.test" {
+		t.Errorf("repo-local identity not read: %+v", id)
+	}
+}

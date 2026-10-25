@@ -2,14 +2,14 @@
 
 Controlled, disposable AI development environments for Claude Code and Codex —
 a single static Go binary that owns the container lifecycle, the egress
-allowlist, and a repository policy with **no git write path inside the
-container**. Successor to `bclaude`; [docs/PLAN.md](docs/PLAN.md) is the
-design and migration plan.
+allowlist, and a git policy where **every commit and push needs your yes** —
+soft by default, kernel-enforced read-only on request. Successor to `bclaude`;
+[docs/PLAN.md](docs/PLAN.md) is the design and migration plan.
 
 ## Quick start — VS Code Dev Container (the simplest setup)
 
 Everything you need to open a repository in VS Code, wired to the allowlisting
-proxy and the read-only-git policy:
+proxy and the git policy:
 
 ```bash
 make install                      # build and install → ~/.local/bin/aibox
@@ -49,11 +49,18 @@ aibox run shell                   # a shell in the same environment
 
 ## What the environment enforces
 
-- **No git write path.** Inside the container `.git` is mounted read-only and a
-  loud shim explains it to the agent: commits, pushes and checkouts are made by
-  you, on the host, always. Read-only git (`status`, `diff`, `log`, `show`,
-  `blame`) works normally. `aibox handoff` turns the agent's handoff notes into
-  the exact git commands to run — printed, never executed.
+- **Ask-first git.** By default git works fully inside the container, and the
+  environment notes and the built-in aibox skill make writes a soft policy: the
+  agent shows you the command and the full message and waits for your yes
+  before every commit, push and tag, and keeps AI attribution out of commit
+  messages, PR and MR text, issues and comments. Your host `user.name` and
+  `user.email` are forwarded as `GIT_AUTHOR_*`/`GIT_COMMITTER_*`; the host
+  `~/.gitconfig` is never mounted, so a push authenticates per command with a
+  token from `/creds`. The forge CLIs `gh` and `glab` are in the image under
+  the same ask-first rule. `git.history: read-only` is the opt-in hard mode:
+  `.git` is mounted read-only, a loud shim explains it, and `aibox handoff`
+  turns the agent's handoff notes into the exact git commands for you to run —
+  printed, never executed.
 - **Allowlisted egress.** In proxy mode the container has no route out except a
   squid sidecar that permits only allowlisted domains, plus a relay for named
   TCP services. A blocked connection is an ACL denial, not an outage.

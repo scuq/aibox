@@ -35,6 +35,7 @@ type Options struct {
 	ProjectName string
 	Assistants  []assistant.Assistant
 	GitMounts   git.Mounts
+	GitIdentity git.Identity // forwarded as GIT_AUTHOR_*/GIT_COMMITTER_*; empty forwards nothing
 	// Fresh adds an image rebuild to the initializeCommand and --rm so the
 	// container is recreated from the fresh image rather than revived.
 	Fresh   bool
@@ -245,9 +246,16 @@ func Generate(o Options) (string, error) {
         "HTTP_PROXY": %[1]q,
         "http_proxy": %[1]q,
         "NO_PROXY": %[2]q,
-        "no_proxy": %[2]q
-    },
-`, proxyURL, egress.NoProxy)
+        "no_proxy": %[2]q,
+        "AIBOX_GIT_HISTORY": %[3]q`, proxyURL, egress.NoProxy, cfg.Git.History)
+		// AIBOX_GIT_HISTORY is what the git shim reads: without it a read-only
+		// devcontainer would still enforce (EROFS) but lose the explanation.
+		// The host git identity follows, as variables — the same four
+		// `aibox run` sets; the host gitconfig file is never mounted.
+		for _, e := range o.GitIdentity.Env() {
+			w(",\n        %q: %q", e.Name, e.Value)
+		}
+		w("\n    },\n")
 	}
 
 	// Dev Containers starts the container with its own --entrypoint, so

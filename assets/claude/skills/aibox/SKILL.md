@@ -1,11 +1,12 @@
 ---
 name: aibox
 description: >
-  How to work inside an aibox container. Load when git write commands are
-  refused, when work is ready to commit or push, when a secret, token, key or
-  password is needed, when a network request fails or times out, when a
-  container, registry, package install or host-side action is needed, or when
-  you are unsure what persists or what you may write.
+  How to work inside an aibox container. Load before any git commit, push or
+  tag, when work is ready to commit or push, when a pull request, merge
+  request, issue, comment or release is to be made with gh or glab, when a
+  secret, token, key or password is needed, when a network request fails or
+  times out, when a container, registry, package install or host-side action
+  is needed, or when you are unsure what persists or what you may write.
 ---
 
 # Working inside aibox
@@ -18,8 +19,10 @@ section once: egress mode, git history, relay services.
 
 ## Rules
 
-1. Never attempt a git write verb (add, commit, push, checkout, stash, reset,
-   fetch, pull, tag, branch -d, ...). `.git` is mounted read-only.
+1. Git writes work, but a commit, push, tag, merge, rebase, reset, branch
+   deletion or force operation never happens on your own initiative: rule 6
+   applies to each one. If `ainotes` → "This session" says `.git` is
+   read-only, do not attempt any write verb; use the handoff below.
 2. Never print, echo, log, or write a secret to a file. Never put a secret
    in argv, because `ps` shows argv.
 3. Never retry a blocked network request in a loop. Never tunnel, change
@@ -27,11 +30,54 @@ section once: egress mode, git history, relay services.
 4. Never try to start podman or docker. There is no container runtime.
 5. Every host command you give the user goes in one copy-pasteable block.
    Do not scatter commands through prose.
+6. Ask the user before every commit, push and forge write, and wait for a
+   yes. This applies each time, also when the same kind of action was
+   approved before. Show the exact command or message you intend to use.
+7. Never put AI attribution into a commit message, PR or MR description,
+   issue, comment, review or release note. No `Co-Authored-By`, no
+   "Generated with", no mention of Claude, Claude Code, Codex, an AI, an
+   assistant or an agent. The text is the user's own words.
 
-## Git: the handoff
+## Git: commit and push
 
-Read-only git works: status, diff, log, show, blame, grep, `branch` (list),
-`remote -v`. When a change is ready:
+Read-only git (status, diff, log, show, blame, grep, branch list,
+`remote -v`) needs no question. For a commit, push or tag:
+
+1. Check `ainotes` → "This session" for the git mode and the identity. In a
+   read-only session go to "The handoff" below instead.
+2. Review what goes in: `git status --porcelain`, `git diff HEAD --stat`.
+   Stage exact paths, not `-A`, when unrelated files are dirty.
+3. Show the user the paths and the full commit message, ask, and wait for a
+   yes. Then commit with a heredoc so the message survives quoting:
+
+   ```bash
+   git add path/one path/two
+   git commit -F - <<'EOF'
+   type: imperative subject, max 72 chars
+
+   body: why, not what. No trailers, no AI attribution.
+   EOF
+   ```
+
+   If "This session" reports no identity, ask the user for name and email
+   and pass them: `git -c user.name=… -c user.email=… commit …`.
+4. Push only after a separate yes for the push. Over https the token comes
+   from `/creds`, scoped to that one command:
+
+   ```bash
+   GH_TOKEN="$(creds get github-token)" git -c credential.helper='!gh auth git-credential' push -u origin <branch>
+   GITLAB_TOKEN="$(creds get gitlab-token)" git -c credential.helper='!glab auth git-credential' push
+   ```
+
+   Over ssh the forge must be reachable (a relay service in proxy mode) and
+   a key loaded; otherwise hand the push to the user as a host command.
+5. A new branch (`git switch -c <branch>`) and a release tag
+   (`git tag -a vX.Y.Z -m "vX.Y.Z" && git push --tags`) each get their own
+   question. Keep `CHANGELOG.md` current under `## Unreleased`.
+
+### The handoff
+
+For a read-only session, or when the user prefers to commit on the host:
 
 1. Write the handoff files into `/work/.aibox/`. That directory is writable,
    and `aibox handoff` on the host reads it:
@@ -54,7 +100,7 @@ Read-only git works: status, diff, log, show, blame, grep, `branch` (list),
    ## Suggested commit message
    <type>: <imperative subject, max 72 chars>
 
-   <body: why, not what>
+   <body: why, not what — no trailers, no AI attribution>
    ## Files
    - path — one-line reason
    ## Verify
@@ -80,11 +126,37 @@ Read-only git works: status, diff, log, show, blame, grep, `branch` (list),
    For a new branch, put `git switch -c <branch>` first. For a release tag:
    `git tag -a vX.Y.Z -m "vX.Y.Z" && git push --tags`.
 
-3. Keep `CHANGELOG.md` current under `## Unreleased`. It is a normal file,
-   so you can edit it.
-
 `.aibox/` is the handoff directory. Do not commit it. If it is not in
 `.gitignore`, tell the user.
+
+## Forge: `gh` and `glab`
+
+`gh` (GitHub) and `glab` (GitLab) are installed, and forge writes are
+allowed: `pr`/`mr create`, `comment`, `review`, `merge`, `issue`,
+`release`. They go over the API, so they do not need a git write path. The
+rules:
+
+1. Ask before every write. Show the exact command and, for a PR, MR, issue
+   or comment, the full text. Wait for a yes. Reads (`pr list`, `pr view`,
+   `issue view`, `api GET`) need no question.
+2. A PR or MR needs the branch on the forge first: that push is its own
+   question (see "Git: commit and push"). Open the PR or MR after the push
+   has succeeded.
+3. No AI attribution in any text you send (rule 7). Do not use a template or
+   flag that adds one.
+4. The token comes from `/creds`, scoped to one command (see Secrets):
+
+   ```bash
+   GH_TOKEN="$(creds get github-token)" gh pr create --fill
+   GITLAB_TOKEN="$(creds get gitlab-token)" glab mr create --fill
+   # self-hosted GitLab: GITLAB_HOST=gitlab.example.com (allowlist it first)
+   ```
+
+   Do not run `gh auth login` or `glab auth login`. They write a token to
+   `$HOME`, which does not persist and must not hold secrets.
+
+In proxy mode `api.github.com`, `uploads.github.com` and `gitlab.com` are
+allowlisted by default. A self-hosted forge needs `aibox egress allow HOST`.
 
 ## Secrets: `creds`
 
@@ -193,15 +265,16 @@ The registry domain must be allowlisted in proxy mode.
   paramiko is preinstalled for the system `python3`.
 - Node: `npm install -g` goes to `~/.npm-global` (on PATH).
 - Go: `go install` goes to `~/.cache/go/bin` (on PATH, persists).
-- Preinstalled: rg fd bat fzf tree jq yq curl nc openssl expect skopeo oc
-  kubectl bao pwsh lua ansible ansible-lint go uv ruff mypy pytest node.
+- Preinstalled: rg fd bat fzf tree jq yq curl nc openssl expect skopeo gh
+  glab oc kubectl bao pwsh lua ansible ansible-lint go uv ruff mypy pytest
+  node.
   Check `ainotes` before you install anything.
 
 ## What persists and what you may write
 
 | Path | Writable | Persists |
 |---|---|---|
-| `/work` (not `.git`) | yes (unless `--ro`) | yes — it is the host repo |
+| `/work` (incl. `.git` unless the session is read-only) | yes (unless `--ro`) | yes — it is the host repo |
 | `/work/.aibox/` | yes | yes — handoff to host |
 | `~/.cache` | yes | yes — cache volume, all projects |
 | `/ephemeral` | yes | wiped at every session start; shared with host |

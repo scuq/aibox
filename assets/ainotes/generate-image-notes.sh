@@ -32,6 +32,8 @@ BAO_V="$(ver bao --version)"
 OPENSSL_V="$(ver openssl version)"
 YQ_V="$(ver yq --version)"
 SKOPEO_V="$(ver skopeo --version)"
+GH_V="$(ver gh --version)"
+GLAB_V="$(ver glab --version)"
 
 cat > "$SHARE/image-manifest.json" <<EOF
 {
@@ -39,12 +41,13 @@ cat > "$SHARE/image-manifest.json" <<EOF
   "image": { "profile": "${AIBOX_PROFILE:-base}", "release": "${AIBOX_RELEASE:-local}" },
   "toolchains": { "go": "$GO_V", "node": "$NODE_V", "python": "$PYTHON_V", "lua": "$LUA_V", "powershell": "$PWSH_V" },
   "assistants": { "claude": "$CLAUDE_V", "codex": "$CODEX_V" },
-  "tools": { "ripgrep": "$RG_V", "fd": "$FD_V", "bat": "$BAT_V", "yq": "$YQ_V", "oc": "$OC_V", "ansible-core": "$ANSIBLE_V", "openbao": "$BAO_V", "openssl": "$OPENSSL_V", "skopeo": "$SKOPEO_V" }
+  "tools": { "ripgrep": "$RG_V", "fd": "$FD_V", "bat": "$BAT_V", "yq": "$YQ_V", "oc": "$OC_V", "ansible-core": "$ANSIBLE_V", "openbao": "$BAO_V", "openssl": "$OPENSSL_V", "skopeo": "$SKOPEO_V", "gh": "$GH_V", "glab": "$GLAB_V" }
 }
 EOF
 
-# The image layer of the notes. The git-policy section leads on purpose: the
-# assistant plans around the constraint instead of discovering it by failure.
+# The image layer of the notes. The git-policy section leads on purpose: git
+# writes work here, and the assistant must know they are the user's call
+# before the first one, not after.
 # The network and "no runtime here" sections turn the two things an agent most
 # often gets wrong in this environment — a blocked domain read as an outage,
 # and trying to start a container that cannot start — into a hand-off to the
@@ -53,27 +56,37 @@ cat > "$SHARE/ainotes-image.md" <<EOF
 # aibox environment notes
 
 ## Repository writes — read this first
-Do NOT use git write commands (add, commit, push, checkout, reset, stash…).
-.git is read-only; the user commits on the host. Record intended changes in
-.aibox/HANDOFF.md with a suggested commit message. Read-only git (status,
-diff, log, show, blame, grep) works. When a push is needed, do NOT attempt it
-— hand the user the commands to run on the host, e.g.:
-    git -C <repo> add -A && git commit -m "…" && git push
+git works here, writes included — but every commit, push and tag is the
+USER's decision. Before each one: show the exact command and the full
+message, ask, and wait for a yes. A yes covers that one action only; never
+assume it from an earlier one. Identity: see "This session"; if none, ask
+for it. A push over https needs a token for that one command:
+    GH_TOKEN="\$(creds get NAME)" git -c credential.helper='!gh auth git-credential' push
+If "This session" says .git is read-only, do not try: write .aibox/HANDOFF.md
+with a suggested commit message and hand the user the host commands.
+No AI attribution, ever: no "Co-Authored-By", "Generated with" or mention
+of Claude, Claude Code, Codex, an AI or an agent in commit messages, PR/MR
+text, issues, comments or release notes. They are the user's own words.
+
+## Forge CLIs — gh (GitHub) and glab (GitLab)
+Writes (pr/mr create, comment, review, merge, issue, release) are allowed
+under the same rule: show the command, ask, wait for a yes — every time.
+Token from /creds, scoped to one command:
+    GH_TOKEN="\$(creds get NAME)" gh pr create …
+    GITLAB_TOKEN="\$(creds get NAME)" glab mr create …   # GITLAB_HOST if self-hosted
 
 ## aibox skill and agent (Claude)
 Built in: skill \`aibox\` and agent \`aibox\` (linked into ~/.claude from
 /usr/share/aibox/claude). Load the skill, or delegate to the agent, when: a
-change is ready to commit/push (HANDOFF.md + exact host git commands), a
-secret from /creds is needed, a request/registry/relay fails, or something
-must run on the host. The agent does not write application code.
+change is ready to commit/push, a PR/MR is to be opened, a secret from /creds
+is needed, a request/registry/relay fails, or something must run on the
+host. The agent does not write application code.
 
 ## Changelog & releases
-Keep a CHANGELOG.md in the repo root and update it as you work: record every
-notable change under a "## Unreleased" heading. You CAN write CHANGELOG.md —
-it is an ordinary file, not under .git. Releases use semver and git tags, cut
-by the user on the host — when one is due, rename Unreleased to "## X.Y.Z -
-YYYY-MM-DD" and hand over:
-    git -C <repo> tag -a vX.Y.Z -m "vX.Y.Z" && git push --tags
+Keep CHANGELOG.md (an ordinary, writable file) current under "## Unreleased".
+A release is a semver tag (ask first, as for any tag): rename Unreleased to
+"## X.Y.Z - YYYY-MM-DD", then
+    git tag -a vX.Y.Z -m "vX.Y.Z" && git push --tags
 
 ## Network — allowlisted, not open
 Outbound HTTP/HTTPS goes through a squid proxy that permits only allowlisted
@@ -87,13 +100,12 @@ the host — do not work around it:
     aibox egress allow HOST                    # an HTTPS domain (int or ext)
     # a raw TCP service (ssh/db/api): add it under services: in .aibox.yaml,
     # then: aibox relay restart   — reach it by name, e.g.  ssh <service>
-Relay services already granted are listed in /run/aibox/services.json.
+Granted relay services: /run/aibox/services.json.
 
 ## No container runtime here
-There is no podman/docker in this environment. If the project needs services
-(database, cache, broker, a compose stack) to build, run or test, do NOT try
-to start them here — print the commands and hand them to the user to run on
-the host, e.g.:
+No podman/docker. If the project needs services (database, cache, broker, a
+compose stack), do NOT try to start them here — hand the user the commands
+to run on the host, e.g.:
     podman run -d --name pg -e POSTGRES_PASSWORD=dev -p 5432:5432 postgres:16
 
 ## /creds — secrets (encrypted, access-gated)
@@ -108,19 +120,17 @@ exposed by any means, STOP, tell the user it is compromised, and have them
 rotate it with 'aibox secret rotate-key' before continuing.
 
 ## /ephemeral — scratch shared with the host
-/ephemeral is a read-write directory shared with the host and OUTSIDE the git
-repo; nothing in it is part of the project. Use it to hand work to the host:
-drop a probe/test script there and ask the user to run it on the host, which
-has an unfiltered network this container does not, with:
+/ephemeral is read-write, shared with the host and OUTSIDE the git repo. Use
+it to hand work to the host: drop a probe/test script there and ask the user
+to run it on the host (unfiltered network) with:
     cd "\$(aibox ephemeral)" && ./yourscript
-Files you create in /ephemeral are the user's on the host, and theirs are
-yours here. It is wiped clean at the start of every session, so treat it as
-transient. It is the right place for anything that needs to run outside the
-sandbox — never work around the egress policy from inside.
+Its files are shared both ways and wiped at every session start. It is the
+place for anything that must run outside the sandbox — never work around the
+egress policy from inside.
 
 ## Tools (prefer these over defaults)
 search  rg  fd  ast-grep     view  bat  tree  less     data  jq  yq(YAML)
-net     curl  nc  openssl  expect                       vcs   git(read-only)
+net     curl  nc  openssl  expect        vcs  git  gh  glab
 k8s     oc  kubectl          secrets  bao(OpenBao)       shells bash pwsh lua
 oci     skopeo (registry inspect/copy; no daemon)
 iac     ansible ansible-lint (own venv; galaxy→~/.cache/ansible)
@@ -128,8 +138,8 @@ build   go(gopls,staticcheck,dlv,goimports)  python(uv,ruff,mypy,pytest,paramiko
 arch    tar  bzip2  unzip
 versions: go $GO_V · node $NODE_V · python $PYTHON_V · oc $OC_V · ansible $ANSIBLE_V
 · pwsh $PWSH_V · lua $LUA_V · yq $YQ_V · bao $BAO_V · openssl $OPENSSL_V
-· rg $RG_V · fd $FD_V · bat $BAT_V · skopeo $SKOPEO_V
-Caches under ~/.cache persist across runs; re-downloading is unnecessary.
+· rg $RG_V · fd $FD_V · bat $BAT_V · skopeo $SKOPEO_V · gh $GH_V · glab $GLAB_V
+~/.cache persists across runs; re-downloading is unnecessary.
 
 ## Writable paths
 /work (except /work/.git) · /work/.aibox · /ephemeral (shared w/ host) · /tmp

@@ -246,8 +246,9 @@ type GitRemoteConflict struct {
 
 // FindGitRemoteConflicts compares service backends against the workspace's git
 // remotes (§8.9). A match means SSH to that host becomes possible at the
-// network layer, so `git push` over it would work and the read-only .git mount
-// (§4 layer 1) is the only thing left standing. Warned loudly, never a refusal
+// network layer, so `git push` over it would work; in read-only mode the .git
+// mount is the only thing left standing, in read-write mode only the notes'
+// ask-first policy is. Warned loudly, never a refusal
 // — there are legitimate reasons to reach a host that also serves git.
 //
 // remotes maps remote name → URL, as `git remote -v` reports.

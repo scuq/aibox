@@ -255,12 +255,31 @@ func TestRunSpecShell(t *testing.T) {
 
 func TestRunSpecGitMounts(t *testing.T) {
 	in := testInputs(t)
-	in.GitMounts = git.Plan(git.RepoInfo{
-		IsRepo: true, DotGit: "/home/u/proj/.git", CommonDir: "/home/u/proj/.git",
-	}, "read-only", "/home/u/proj")
+	repo := git.RepoInfo{IsRepo: true, DotGit: "/home/u/proj/.git", CommonDir: "/home/u/proj/.git"}
+
+	// Opt-in hard mode: .git read-only over the workspace.
+	in.GitMounts = git.Plan(repo, "read-only", "/home/u/proj")
 	argv := argvString(t, in, false)
 	if !strings.Contains(argv, "--volume /home/u/proj/.git:/work/.git:ro") {
-		t.Errorf(".git must be mounted read-only over the workspace:\n%s", argv)
+		t.Errorf("read-only: .git must be mounted read-only over the workspace:\n%s", argv)
+	}
+
+	// Default read-write mode: nothing over .git, the mode is told to the
+	// container, and the host identity arrives as variables.
+	in.GitMounts = git.Plan(repo, "read-write", "/home/u/proj")
+	in.GitIdentity = git.Identity{Name: "Some User", Email: "u@example.test"}
+	argv = argvString(t, in, false)
+	if strings.Contains(argv, "/work/.git") {
+		t.Errorf("read-write: nothing may be mounted over .git:\n%s", argv)
+	}
+	for _, want := range []string{
+		"AIBOX_GIT_HISTORY=read-write",
+		"GIT_AUTHOR_NAME=Some User", "GIT_AUTHOR_EMAIL=u@example.test",
+		"GIT_COMMITTER_NAME=Some User", "GIT_COMMITTER_EMAIL=u@example.test",
+	} {
+		if !strings.Contains(argv, want) {
+			t.Errorf("argv missing %q:\n%s", want, argv)
+		}
 	}
 }
 

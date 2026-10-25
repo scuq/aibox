@@ -117,9 +117,9 @@ func TestValidate(t *testing.T) {
 	}
 
 	cfg = base
-	cfg.Git.Identity = true
-	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "identity") {
-		t.Errorf("git.identity=true must fail loudly, got %v", err)
+	cfg.Git.History = "read-only"
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("git.history=read-only is the opt-in hard mode and must validate, got %v", err)
 	}
 
 	cfg = base

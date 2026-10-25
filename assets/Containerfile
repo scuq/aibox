@@ -252,6 +252,52 @@ RUN set -eu; \
     rm -f /tmp/bao.tgz; \
     /usr/local/bin/bao --version
 
+# The forge CLIs: gh (GitHub) and glab (GitLab). They open and comment on
+# PRs/MRs and issues and cut releases over the API, and they double as git
+# credential helpers for an https push (`-c credential.helper='!gh auth
+# git-credential'` with a token from /creds). The notes and the aibox skill
+# tell the agent to ask the user before every forge write, commit and push,
+# and to keep AI attribution out of commit messages, PR/MR text, issues and
+# comments. Both are single static Go
+# binaries, pinned and checksummed like the toolchains above; gh nests its
+# binary under a versioned directory, glab under bin/, hence the two
+# --strip-components. Tokens come from /creds per command (GH_TOKEN,
+# GITLAB_TOKEN); nothing is stored in the image. api.github.com,
+# uploads.github.com and gitlab.com are in the base egress allowlist.
+ARG GH_VERSION=2.103.2
+ARG GH_SHA256_AMD64=62ccf747115ddc61237efffdde66a3c8f70ba249433dc64f70801089b59c59c8
+ARG GH_SHA256_ARM64=4c3e99a50bd8b181a3fe9d69b25dd978bac768148d88f01507c6b4d1ef61a443
+RUN set -eu; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+        amd64) sha="$GH_SHA256_AMD64" ;; \
+        arm64) sha="$GH_SHA256_ARM64" ;; \
+        *) echo "no pinned gh tarball for $arch" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o /tmp/gh.tgz "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${arch}.tar.gz"; \
+    echo "$sha  /tmp/gh.tgz" | sha256sum -c -; \
+    tar -C /usr/local/bin -xzf /tmp/gh.tgz --strip-components=2 "gh_${GH_VERSION}_linux_${arch}/bin/gh"; \
+    chmod 0755 /usr/local/bin/gh; \
+    rm -f /tmp/gh.tgz; \
+    /usr/local/bin/gh --version
+
+ARG GLAB_VERSION=1.124.0
+ARG GLAB_SHA256_AMD64=63df684842b0697e418649dd64374d37ac1da0fbcdcb422d6a5557222f8bb40f
+ARG GLAB_SHA256_ARM64=0716395a0efeb991fc844b33fe55310645afcbd9b9746e50c725e9d1cd1b8d16
+RUN set -eu; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+        amd64) sha="$GLAB_SHA256_AMD64" ;; \
+        arm64) sha="$GLAB_SHA256_ARM64" ;; \
+        *) echo "no pinned glab tarball for $arch" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o /tmp/glab.tgz "https://gitlab.com/gitlab-org/cli/-/releases/v${GLAB_VERSION}/downloads/glab_${GLAB_VERSION}_linux_${arch}.tar.gz"; \
+    echo "$sha  /tmp/glab.tgz" | sha256sum -c -; \
+    tar -C /usr/local/bin -xzf /tmp/glab.tgz --strip-components=1 bin/glab; \
+    chmod 0755 /usr/local/bin/glab; \
+    rm -f /tmp/glab.tgz; \
+    /usr/local/bin/glab --version
+
 # Passwordless apt for the aibox user. This is inert by default: the runtime
 # runs with no-new-privileges + cap-drop=ALL, which blocks sudo entirely. It
 # only takes effect when aibox is run with --allow-pkg, which relaxes those
@@ -280,21 +326,24 @@ RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_VERSION} \
                    @openai/codex@${CODEX_VERSION} \
     && npm cache clean --force
 
-# The git shim precedes /usr/bin/git on PATH. It stops git *write* verbs
-# loudly — the kernel-level enforcement is the read-only .git mount; the shim
-# exists so the agent gets one clear explanation instead of a bare EROFS and
-# three turns of --force escalation. Never fakes success: an agent building a
-# multi-step plan on a lie fails somewhere far away.
+# The git shim precedes /usr/bin/git on PATH. In the default read-write mode
+# it is a pure pass-through: git writes are allowed and the ask-first policy
+# lives in the notes. Under git.history: read-only it stops git *write* verbs
+# loudly — the kernel-level enforcement there is the read-only .git mount; the
+# shim exists so the agent gets one clear explanation instead of a bare EROFS
+# and three turns of --force escalation. Never fakes success: an agent
+# building a multi-step plan on a lie fails somewhere far away.
 COPY git-shim.sh /usr/local/bin/git
 RUN chmod 0755 /usr/local/bin/git
 
-# A minimal generated git identity — deliberately *not* the host ~/.gitconfig,
-# which bclaude used to mount so `git commit` inside knew who you are. That
-# requirement is gone: there is no git write path, so no identity and no
-# credential helper belong in here. safe.directory prevents a
-# dubious-ownership refusal on unusual host uid configurations; gc.auto=0
-# because gc would try to write the read-only object store; fsmonitor off
-# because the daemon would try to write under .git.
+# A minimal generated git config — deliberately *not* the host ~/.gitconfig,
+# which bclaude used to mount so `git commit` inside knew who you are. The
+# identity now arrives as GIT_AUTHOR_*/GIT_COMMITTER_* variables that `aibox
+# run` reads from the host, so no identity and no credential helper belong in
+# here. safe.directory prevents a dubious-ownership refusal on unusual host
+# uid configurations; gc.auto=0 because gc would try to write a read-only
+# object store (history: read-only) and is never the agent's job; fsmonitor
+# off because the daemon would try to write under .git.
 COPY gitconfig /home/aibox/.gitconfig
 
 # .claude/.codex are the mountpoints for the per-assistant config volumes and
@@ -363,10 +412,10 @@ RUN AIBOX_PROFILE="$AIBOX_PROFILE" AIBOX_RELEASE="$AIBOX_RELEASE" \
 # pointed at the merged system bundle, which is harmless when no custom CA
 # was added and essential when one was.
 #
-# GIT_OPTIONAL_LOCKS=0 is the single most important line of the git policy:
-# without it `git status` tries to refresh and write the index, hits the
-# read-only .git mount, and produces errors that send the agent down a rabbit
-# hole. With it, read-only git is genuinely clean.
+# GIT_OPTIONAL_LOCKS=0 is what keeps git.history: read-only usable: without it
+# `git status` tries to refresh and write the index, hits the read-only .git
+# mount, and produces errors that send the agent down a rabbit hole. In the
+# default read-write mode it merely skips an optional index refresh.
 #
 # LC_ALL/LANG=C.UTF-8: a locale that is always present in glibc (no locale-gen)
 # and UTF-8 aware, so tools do not fall back to ASCII or emit "setting locale

@@ -1,9 +1,10 @@
 package git_test
 
-// Table test for the git shim's verb parsing — the verb is not always $1
-// (`git -C DIR commit`, `git --git-dir=X push`), and a shim that misses those
-// forms is a policy with a hole in it. The shim runs here under bash with the
-// real git swapped for a recorder.
+// Table test for the git shim's verb parsing under git.history: read-only —
+// the verb is not always $1 (`git -C DIR commit`, `git --git-dir=X push`),
+// and a shim that misses those forms is a policy with a hole in it. The shim
+// runs here under bash with the real git swapped for a recorder. In the
+// default read-write mode the shim is a pure pass-through, tested separately.
 
 import (
 	"os"
@@ -127,9 +128,10 @@ func TestShimVerbTable(t *testing.T) {
 		{"bare git", nil, false},
 		{"--version", []string{"--version"}, false},
 	}
+	readOnly := []string{"AIBOX_GIT_HISTORY=read-only"}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			res := runShim(t, nil, tt.args...)
+			res := runShim(t, readOnly, tt.args...)
 			if tt.denied {
 				if res.exitCode == 0 {
 					t.Errorf("git %s should be denied, exited 0\n%s", strings.Join(tt.args, " "), res.output)
@@ -158,16 +160,33 @@ func TestShimVerbTable(t *testing.T) {
 func TestShimOffPassesEverything(t *testing.T) {
 	// git.shim: off is for debugging the shim itself; the read-only mount
 	// still enforces.
-	res := runShim(t, []string{"AIBOX_GIT_SHIM=off"}, "commit", "-m", "x")
+	res := runShim(t, []string{"AIBOX_GIT_SHIM=off", "AIBOX_GIT_HISTORY=read-only"}, "commit", "-m", "x")
 	if res.exitCode != 0 || !res.reached {
 		t.Errorf("with the shim off, commit should reach the real git (exit %d, reached %v)", res.exitCode, res.reached)
+	}
+}
+
+func TestShimReadWritePassesEverything(t *testing.T) {
+	// The default mode: git writes are allowed and the ask-first policy lives
+	// in the notes, so the shim must not stand in the way — neither when the
+	// mode is stated nor when it is unset (a bare podman run of the image).
+	for _, env := range [][]string{nil, {"AIBOX_GIT_HISTORY=read-write"}} {
+		for _, args := range [][]string{
+			{"commit", "-m", "x"}, {"push"}, {"add", "."}, {"checkout", "-b", "x"},
+			{"config", "--global", "user.name", "x"},
+		} {
+			res := runShim(t, env, args...)
+			if res.exitCode != 0 || !res.reached {
+				t.Errorf("env %v: git %s should pass through (exit %d, reached %v)\n%s", env, strings.Join(args, " "), res.exitCode, res.reached, res.output)
+			}
+		}
 	}
 }
 
 func TestShimNeverFakesSuccess(t *testing.T) {
 	// Never fake success to an agent: it will build a multi-step plan on the
 	// lie. A denied verb must exit non-zero.
-	res := runShim(t, nil, "commit", "-m", "x")
+	res := runShim(t, []string{"AIBOX_GIT_HISTORY=read-only"}, "commit", "-m", "x")
 	if res.exitCode == 0 {
 		t.Fatal("denied verb exited 0 — the shim faked success")
 	}

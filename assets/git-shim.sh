@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 # aibox git shim — /usr/local/bin/git, ahead of /usr/bin/git on PATH.
 #
-# This is agent UX, not security. The enforcement is the read-only .git mount
-# (kernel EROFS); the shim exists so a write verb stops with one clear,
-# agent-readable explanation instead of a bare filesystem error and three
-# turns of --force escalation. It must never fake success: an agent builds a
-# multi-step plan on the lie and the failure surfaces somewhere far away.
+# This is agent UX, not security, and it only acts under `git.history:
+# read-only`. There the enforcement is the read-only .git mount (kernel
+# EROFS); the shim exists so a write verb stops with one clear, agent-readable
+# explanation instead of a bare filesystem error and three turns of --force
+# escalation. It must never fake success: an agent builds a multi-step plan on
+# the lie and the failure surfaces somewhere far away.
 #
+# In the default read-write mode every verb passes straight through: git
+# writes are allowed, and whether one is appropriate right now is the
+# ask-first policy in the environment notes, not this script's business.
 # Everything not on the denied list passes through to the real git untouched.
 set -euo pipefail
 
@@ -18,15 +22,22 @@ if [ "${AIBOX_GIT_SHIM:-}" = "off" ]; then
     exec "$REAL_GIT" "$@"
 fi
 
+# The session's git.history mode, set by `aibox run`. Unset means a bare
+# `podman run` of the image, where nothing is mounted read-only either.
+if [ "${AIBOX_GIT_HISTORY:-read-write}" != "read-only" ]; then
+    exec "$REAL_GIT" "$@"
+fi
+
 deny() {
     local verb="$1"
     cat >&2 <<EOF
-aibox: \`git $verb\` is not available in this container.
+aibox: \`git $verb\` is not available in this session.
 
-Repository history is mounted read-only. Commits are made by the user on
-the host. Record what you changed and why in .aibox/HANDOFF.md, including a
-suggested commit message. Read-only git (status, diff, log, show, blame)
-works normally. See \`ainotes\`.
+This session runs with git.history: read-only — repository history is
+mounted read-only and commits are made by the user on the host. Record what
+you changed and why in .aibox/HANDOFF.md, including a suggested commit
+message. Read-only git (status, diff, log, show, blame) works normally. See
+\`ainotes\`.
 EOF
     exit 2
 }

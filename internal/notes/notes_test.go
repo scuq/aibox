@@ -25,6 +25,13 @@ func TestPolicyLayer(t *testing.T) {
 	if !strings.Contains(proxied, "allowlisted proxy") {
 		t.Errorf("proxy mode not stated:\n%s", proxied)
 	}
+	if got := PolicyLayer(cfg); !strings.Contains(got, "ask the user before every commit") {
+		t.Errorf("default read-write mode must state the ask-first policy:\n%s", got)
+	}
+	cfg.Git.History = "read-only"
+	if got := PolicyLayer(cfg); !strings.Contains(got, "READ-ONLY") || !strings.Contains(got, "HANDOFF.md") {
+		t.Errorf("read-only mode must point at the handoff:\n%s", got)
+	}
 	cfg.Git.History = "none"
 	if got := PolicyLayer(cfg); !strings.Contains(got, "history: none") {
 		t.Errorf("history none not surfaced:\n%s", got)
@@ -121,13 +128,17 @@ func TestImageNotesGeneratorGatesTheBudget(t *testing.T) {
 	if toolIdx := strings.Index(gen, "Tools (prefer these"); toolIdx != -1 && toolIdx < idx {
 		t.Error("the git policy must lead the notes")
 	}
-	// The escape-hatch guidance the agent most needs: verify-before-giving-up,
-	// the host hand-off for pushes and containers, and the allow command.
+	// The guidance the agent most needs: ask-first git with no AI attribution
+	// and the read-only fallback, verify-before-giving-up, the host hand-off
+	// for containers, and the allow command.
 	for _, want := range []string{
+		"ask, and wait for a yes", "A yes covers that one action only",
+		"No AI attribution", "Co-Authored-By", "HANDOFF.md",
+		"gh (GitHub) and glab (GitLab)",
 		"curl -sSfI", "aibox egress allow", "No container runtime here",
-		"git -C <repo>", "services.json",
+		"services.json",
 		// changelog + semver-tagged releases
-		"CHANGELOG.md", "## Unreleased", "semver", "git -C <repo> tag -a vX.Y.Z",
+		"CHANGELOG.md", "## Unreleased", "semver", "git tag -a vX.Y.Z",
 		// the host-shared scratch mount
 		"/ephemeral", "aibox ephemeral",
 		// the encrypted secrets discipline

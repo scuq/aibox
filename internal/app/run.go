@@ -161,6 +161,7 @@ type sessionInputs struct {
 	ProjectID   string
 	ProjectName string
 	GitMounts   git.Mounts
+	GitIdentity git.Identity // host user.name/user.email, forwarded as env; empty forwards nothing
 	Interactive bool
 	SeedCreds   string // host credentials file to seed, empty for none
 	SeedConfig  []string
@@ -254,15 +255,17 @@ func composeSpec(in sessionInputs) (*container.Spec, error) {
 		env = append(env, e)
 	}
 	if cfg.Git.Shim == "off" {
-		// Debugging the shim itself; the read-only mount still enforces.
+		// Debugging the shim itself; in read-only mode the mount still enforces.
 		env = append(env, container.EnvVar{Name: "AIBOX_GIT_SHIM", Value: "off"})
 	}
 	// The entrypoint renders this run's actual constraints into the policy
-	// layer of the environment notes.
+	// layer of the environment notes; the shim reads the history mode too.
 	env = append(env,
 		container.EnvVar{Name: "AIBOX_EGRESS_MODE", Value: cfg.Egress.Mode},
 		container.EnvVar{Name: "AIBOX_GIT_HISTORY", Value: cfg.Git.History},
 	)
+	// The host's git identity, as four variables — never the gitconfig file.
+	env = append(env, in.GitIdentity.Env()...)
 
 	spec := &container.Spec{
 		Image:    imageRefFor(cfg),
@@ -440,6 +443,13 @@ func cmdRun(ctx context.Context, p *output.Printer, rt *runtime.Podman, args []s
 	for _, w := range gitMounts.Warnings {
 		p.Warn("%s", w)
 	}
+	var gitIdentity git.Identity
+	if cfg.Git.Identity && cfg.Git.History == "read-write" {
+		gitIdentity = git.ReadIdentity(ws)
+		if gitIdentity.Env() == nil {
+			p.Warn("no git user.name/user.email on the host — commits inside the container have no identity until the agent asks you for one")
+		}
+	}
 
 	// Relay client wiring and the git-remote guard (§8.9). Generated on the
 	// host, into temp files that live for the container's lifetime.
@@ -460,6 +470,7 @@ func cmdRun(ctx context.Context, p *output.Printer, rt *runtime.Podman, args []s
 		ProjectID:          projectID,
 		ProjectName:        filepath.Base(ws),
 		GitMounts:          gitMounts,
+		GitIdentity:        gitIdentity,
 		Interactive:        term.IsTerminal(int(os.Stdin.Fd())),
 		TermEnv:            envOr("TERM", "xterm-256color"),
 		ColorTerm:          envOr("COLORTERM", "truecolor"),
@@ -724,10 +735,11 @@ func prepareRelayFiles(p *output.Printer, cfg config.Config, workspace string) (
 
 	// The git-remote guard: a service backend that matches a workspace git
 	// remote makes SSH to that host possible, so git push over it would work
-	// and the read-only .git mount is the only thing left standing. Loud, never
-	// a refusal.
+	// even in proxy mode. In read-only mode the .git mount still blocks it; in
+	// the default read-write mode only the ask-first policy stands between the
+	// agent and that push. Loud, never a refusal.
 	for _, c := range relay.FindGitRemoteConflicts(services, git.Remotes(workspace)) {
-		p.Warn("relay service %q (backend %s) matches git remote %q (%s) — reaching it re-opens a network path git push could use; the read-only .git mount still blocks writes, but this is no longer belt-and-braces", c.Service, c.Backend, c.Remote, c.URL)
+		p.Warn("relay service %q (backend %s) matches git remote %q (%s) — reaching it opens a network path git push can use; with git.history %s %s", c.Service, c.Backend, c.Remote, c.URL, cfg.Git.History, gitGuardConsequence(cfg.Git.History))
 	}
 
 	tmpDir, err = os.MkdirTemp("", "aibox-relay.")
@@ -759,4 +771,13 @@ func apiKeySet(asst assistant.Assistant) bool {
 		}
 	}
 	return false
+}
+
+// gitGuardConsequence finishes the git-remote guard warning for the active
+// history mode: what, if anything, still stands between the agent and a push.
+func gitGuardConsequence(history string) string {
+	if history == "read-only" {
+		return "the read-only .git mount still blocks a push, but this is no longer belt-and-braces"
+	}
+	return "nothing but the ask-first policy in the notes stands between the agent and a push"
 }

@@ -88,10 +88,15 @@ RUN OPTIONS (before the assistant name)
         --dry-run         Print the podman command instead of running it
 
 GIT POLICY
-    Inside the container, .git is mounted read-only: git write commands (add,
-    commit, push, checkout, ...) cannot work and fail loudly. The agent records
-    what it changed in .aibox/HANDOFF.md; you commit on the host. Read-only
-    git (status, diff, log, show, blame) works normally.
+    By default (git.history: read-write) git works fully inside the container
+    and the environment notes make writes a soft policy: the agent asks you
+    before every commit, push and tag, and keeps AI attribution out of
+    messages. Your host user.name/user.email are forwarded as GIT_AUTHOR_* /
+    GIT_COMMITTER_* (git.identity: false stops that); the host gitconfig is
+    never mounted, so a push needs a token per command (see the aibox skill).
+    git.history: read-only is the opt-in hard mode: .git is mounted read-only,
+    write commands fail loudly, the agent hands off via .aibox/HANDOFF.md and
+    you commit on the host. git.history: none masks .git entirely.
 
 ENVIRONMENT
     Only AIBOX_-prefixed variables are read: AIBOX_WORKSPACE, AIBOX_IMAGE,

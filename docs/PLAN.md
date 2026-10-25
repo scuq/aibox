@@ -102,8 +102,19 @@ state file must never change behaviour.
 
 ## 4. Git policy: readable history, no write path
 
-**Requirement: no git write command works inside the container. Commits, adds,
-and pushes are performed by the user on the host, manually, always.**
+> **Superseded (October 2026).** The hard "no write path" policy below is now
+> the opt-in `git.history: read-only` mode. The default is `read-write`: git
+> writes work inside the container and the environment notes plus the aibox
+> skill make them a soft policy — the agent asks the user before every commit,
+> push and tag, and keeps AI attribution out of commit messages and forge
+> text. The host identity is forwarded as `GIT_AUTHOR_*`/`GIT_COMMITTER_*`
+> variables; the host `~/.gitconfig` is still never mounted. Decision rows 6
+> and 7 in §13 read accordingly. Layers 1 and 2 below describe the read-only
+> mode as implemented.
+
+**Requirement (read-only mode): no git write command works inside the
+container. Commits, adds, and pushes are performed by the user on the host,
+manually, always.**
 
 Read-only git is fully supported and expected: `status`, `diff`, `log`, `show`,
 `blame`, `grep`, `rev-parse`, `ls-files`, `describe`, `shortlog`.

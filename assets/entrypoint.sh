@@ -207,9 +207,19 @@ if [ -d /run/aibox ] && [ -w /run/aibox ]; then
         else
             printf 'Egress: OPEN/unfiltered — the Network allowlist guidance above does\nnot apply this session; outbound requests are not proxied.\n'
         fi
-        if [ "${AIBOX_GIT_HISTORY:-read-only}" = "none" ]; then
-            printf 'Git history: unavailable this session (history: none).\n'
-        fi
+        case "${AIBOX_GIT_HISTORY:-read-write}" in
+            none)
+                printf 'Git history: unavailable this session (history: none).\n' ;;
+            read-only)
+                printf 'Git: .git is READ-ONLY this session (history: read-only) — no git write\nverbs; use the handoff (.aibox/HANDOFF.md + host commands) instead.\n' ;;
+            *)
+                printf 'Git: writable — ask the user before every commit, push or tag (see\nRepository writes).\n'
+                if [ -n "${GIT_AUTHOR_NAME:-}" ] && [ -n "${GIT_AUTHOR_EMAIL:-}" ]; then
+                    printf 'Git identity: %s <%s> (from the host).\n' "$GIT_AUTHOR_NAME" "$GIT_AUTHOR_EMAIL"
+                else
+                    printf 'Git identity: NONE forwarded — ask the user for name and email before\nthe first commit, then pass them with -c user.name=… -c user.email=….\n'
+                fi ;;
+        esac
         if [ -s /run/aibox/services.json ]; then
             printf 'Relay services (reach by name, the port is fixed per service):\n'
             # Names only; the backend stays hidden unless a service disclosed it.

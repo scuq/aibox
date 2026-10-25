@@ -84,8 +84,6 @@ func TestGeneratedContent(t *testing.T) {
 		"source=aibox-config-claude-a81f728bc9ef,target=/home/aibox/.claude,type=volume",
 		"source=aibox-auth-claude,target=/home/aibox/.claude-auth,type=volume",
 		"source=aibox-cache-shared,target=/home/aibox/.cache,type=volume",
-		// the git policy: .git read-only over the writable workspace
-		"source=/home/u/chalk/.git,target=/work/.git,type=bind,readonly",
 		// hardening
 		`"--security-opt=no-new-privileges"`,
 		`"--cap-drop=ALL"`,
@@ -246,6 +244,10 @@ func TestCodexSelection(t *testing.T) {
 func TestSELinuxRelabel(t *testing.T) {
 	o := opts(t)
 	o.SELinux = true
+	o.Config.Git.History = "read-only"
+	o.GitMounts = git.Plan(git.RepoInfo{
+		IsRepo: true, DotGit: "/home/u/chalk/.git", CommonDir: "/home/u/chalk/.git",
+	}, "read-only", "/home/u/chalk")
 	out := gen(t, o)
 	if !strings.Contains(out, "target=/work,type=bind,z") {
 		t.Error("workspace mount not relabelled under SELinux")
@@ -253,5 +255,33 @@ func TestSELinuxRelabel(t *testing.T) {
 	// The .git mount is a bind mount too; the relabel appends after readonly.
 	if !strings.Contains(out, "target=/work/.git,type=bind,readonly,z") {
 		t.Errorf("git mount not relabelled:\n%s", out)
+	}
+}
+
+func TestGitPolicyModes(t *testing.T) {
+	// Default read-write: nothing over .git, identity forwarded as variables.
+	o := opts(t)
+	o.GitIdentity = git.Identity{Name: "Some User", Email: "u@example.test"}
+	out := gen(t, o)
+	if strings.Contains(out, "target=/work/.git") {
+		t.Errorf("read-write must not mount over .git:\n%s", out)
+	}
+	for _, want := range []string{`"AIBOX_GIT_HISTORY": "read-write"`, `"GIT_AUTHOR_NAME": "Some User"`, `"GIT_COMMITTER_EMAIL": "u@example.test"`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("devcontainer.json missing %s:\n%s", want, out)
+		}
+	}
+	// Opt-in read-only: .git read-only over the writable workspace.
+	o = opts(t)
+	o.Config.Git.History = "read-only"
+	o.GitMounts = git.Plan(git.RepoInfo{
+		IsRepo: true, DotGit: "/home/u/chalk/.git", CommonDir: "/home/u/chalk/.git",
+	}, "read-only", "/home/u/chalk")
+	out = gen(t, o)
+	if !strings.Contains(out, "source=/home/u/chalk/.git,target=/work/.git,type=bind,readonly") {
+		t.Errorf("read-only must mount .git read-only:\n%s", out)
+	}
+	if !strings.Contains(out, `"AIBOX_GIT_HISTORY": "read-only"`) {
+		t.Errorf("the shim must be told the mode:\n%s", out)
 	}
 }
