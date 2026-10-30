@@ -20,7 +20,7 @@ const (
 	LabelProjectPath = "io.aibox.project.path"
 	// LabelRole is what the resource is for: workspace | proxy | network | volume.
 	LabelRole = "io.aibox.role"
-	// LabelVolumeKind further qualifies role=volume: auth | config | cache.
+	// LabelVolumeKind further qualifies role=volume: auth | config | cache | podman.
 	LabelVolumeKind = "io.aibox.volume.kind"
 	// LabelMode is the lifecycle class: standalone | workspace | devcontainer.
 	LabelMode = "io.aibox.mode"
@@ -45,6 +45,7 @@ const (
 	VolumeAuth   = "auth"
 	VolumeConfig = "config"
 	VolumeCache  = "cache"
+	VolumePodman = "podman"
 )
 
 const (

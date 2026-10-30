@@ -135,7 +135,7 @@ func TestImageNotesGeneratorGatesTheBudget(t *testing.T) {
 		"ask, and wait for a yes", "A yes covers that one action only",
 		"No AI attribution", "Co-Authored-By", "HANDOFF.md",
 		"gh (GitHub) and glab (GitLab)",
-		"curl -sSfI", "aibox egress allow", "No container runtime here",
+		"curl -sSfI", "aibox egress allow", "## Containers",
 		"services.json",
 		// changelog + semver-tagged releases
 		"CHANGELOG.md", "## Unreleased", "semver", "git tag -a vX.Y.Z",

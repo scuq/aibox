@@ -17,6 +17,22 @@ type EnvVar struct {
 	FromHost bool
 }
 
+// NestedPodmanStorage is where the inner podman keeps images and containers.
+// It must be a volume: overlay storage cannot sit on the container's own
+// overlay layer.
+const NestedPodmanStorage = "/home/aibox/.local/share/containers"
+
+// What a session with nested podman adds on top of dropping no-new-privileges
+// and cap-drop=ALL. /dev/fuse is for fuse-overlayfs. label=disable because
+// SELinux confinement stops the inner runtime; it does nothing on other
+// hosts. unmask because the kernel refuses a fresh /proc mount, which every
+// inner container needs, while the outer /proc has masked paths. Shared by
+// `aibox run` and the devcontainer generator so the two cannot drift.
+var (
+	NestedPodmanDevices      = []string{"/dev/fuse"}
+	NestedPodmanSecurityOpts = []string{"label=disable", "unmask=/proc/*"}
+)
+
 // Spec is everything needed to render a `podman run` (or create) argv. It is
 // pure data: building one has no side effects, which is what makes --dry-run
 // exact — the printed argv is the same slice the real run executes.
@@ -54,6 +70,11 @@ type Spec struct {
 	// sudo setuid escalation, and dpkg needs CHOWN/DAC_OVERRIDE etc.
 	NoNewPrivileges bool
 	CapDropAll      bool
+
+	// Devices and SecurityOpts are empty by default; only nested podman sets
+	// them (see NestedPodmanDevices).
+	Devices      []string
+	SecurityOpts []string
 
 	// Network is set only in egress proxy mode: the internal network is the
 	// enforcement (no route out, no external DNS); the proxy env vars in Env
@@ -121,6 +142,12 @@ func (s *Spec) Argv(selinuxRelabel bool) []string {
 	}
 	if s.CapDropAll {
 		args = append(args, "--cap-drop=ALL")
+	}
+	for _, d := range s.Devices {
+		args = append(args, "--device", d)
+	}
+	for _, o := range s.SecurityOpts {
+		args = append(args, "--security-opt", o)
 	}
 	if s.Network != "" {
 		args = append(args, "--network", s.Network)

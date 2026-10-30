@@ -92,6 +92,7 @@ aibox run claude|codex|shell [args…]      ephemeral session (--rm)
     -w DIR         workspace (default: $PWD)     --ro          read-only /work
     --egress MODE  open | proxy                  --allow-pkg   sudo apt inside
     --seed-creds   copy the host login in        --seed-config host Claude cfg
+    --allow-podman nested podman, this run only
     --memory / --cpus / --no-limits             --dry-run     print podman argv
 
 aibox net up | down | status              stand up/tear down the whole
@@ -134,6 +135,10 @@ aibox secret allow-access [--ttl 10m]      temporarily expose the passphrase so
 aibox secret revoke-access                 the container can decrypt; rotate-key
 aibox secret rotate-key                    re-encrypts all after a leak
 
+aibox podman enable | disable | status [-w DIR]
+                                          nested podman for this project,
+                                          kept until disabled
+
 aibox notes [--size | --claude-md]        the environment notes
 aibox notes project init                  scaffold .aibox/ainotes.md
 aibox handoff [--diff | --clear]          print HANDOFF.md + the git commands
@@ -142,6 +147,50 @@ aibox init                                write a .aibox.yaml skeleton
 
 Every inspection command supports `--json`; every run-shaped command supports
 `--dry-run`, printing the exact `podman` invocation with no secret values.
+
+## Nested podman
+
+Nested podman is off by default. A session that does not enable it runs with
+exactly the same flags as before.
+
+Two switches turn it on:
+
+- `aibox podman enable` is per project. It stays on until you run `aibox podman disable`.
+- `--allow-podman` on `aibox run` is for one run.
+
+`AIBOX_ALLOW_PODMAN=1` or `AIBOX_ALLOW_PODMAN=0` overrides the stored state in
+both directions. `aibox podman status` shows the state and its source.
+
+It is not a `.aibox.yaml` key. That file is in `/work`, and the agent can write
+there. A key would let the agent enable the mode for its own next session.
+aibox rejects a `.aibox.yaml` that sets the key. The state is a marker on the
+host at `$XDG_CONFIG_HOME/aibox/projects/<projectID>/nested-podman`.
+
+The mode relaxes these settings:
+
+- It drops `no-new-privileges` and `cap-drop=ALL`. The container gets podman's default capability set, without `SYS_ADMIN`.
+- It adds `--device /dev/fuse`, `--security-opt label=disable`, and `--security-opt unmask=/proc/*`.
+- It mounts the volume `aibox-podman-<projectID>` at `~/.local/share/containers`.
+
+Because `sudo apt-get` depends on the same two dropped flags, it also works in
+these sessions.
+
+The session stays rootless. The pids, memory, and cpu limits still apply.
+Inner containers use the network namespace of the session. The egress proxy and
+the internal network apply to them, and `-p` is not necessary.
+
+In proxy mode, a pull needs the registry hosts on the allowlist. They are not
+in the base allowlist. Add them with `aibox egress allow HOST`:
+
+- `docker.io` needs `registry-1.docker.io`, `auth.docker.io`, `production.cloudflare.docker.com`, and `production.cloudfront.docker.com`.
+- `quay.io` needs `quay.io` and its CDN hosts.
+
+The devcontainer reads the setting when aibox generates it. After you change
+the setting, run `aibox devcontainer create --force`. The generated
+`devcontainer.json` is in the writable workspace.
+
+Nested podman was tested on arm64 with Linux 6.12, with rootless podman 5.4.2
+outside and podman 4.3.1 inside. The devcontainer path has not had a real run.
 
 ## Configuration
 

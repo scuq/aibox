@@ -102,10 +102,10 @@ the host — do not work around it:
     # then: aibox relay restart   — reach it by name, e.g.  ssh <service>
 Granted relay services: /run/aibox/services.json.
 
-## No container runtime here
-No podman/docker. If the project needs services (database, cache, broker, a
-compose stack), do NOT try to start them here — hand the user the commands
-to run on the host, e.g.:
+## Containers
+podman works only if "This session" says ENABLED, on this sandbox's network
+and allowlist. Otherwise do NOT try: give the user host commands or ask for
+'aibox podman enable'. No docker.
     podman run -d --name pg -e POSTGRES_PASSWORD=dev -p 5432:5432 postgres:16
 
 ## /creds — secrets (encrypted, access-gated)

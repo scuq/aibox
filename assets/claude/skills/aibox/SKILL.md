@@ -27,7 +27,8 @@ section once: egress mode, git history, relay services.
    in argv, because `ps` shows argv.
 3. Never retry a blocked network request in a loop. Never tunnel, change
    proxy variables, or use another host to get around the allowlist.
-4. Never try to start podman or docker. There is no container runtime.
+4. Start podman only if `ainotes` → "This session" says nested podman is
+   ENABLED. There is no docker. Otherwise there is no container runtime.
 5. Every host command you give the user goes in one copy-pasteable block.
    Do not scatter commands through prose.
 6. Ask the user before every commit, push and forge write, and wait for a
@@ -242,9 +243,16 @@ an outage.
 
 ## Containers and images
 
-No podman or docker. For services a task needs (database, broker), print
-the `podman run ...` command for the host. For registry work, use
-**skopeo**. It needs no daemon:
+Without nested podman, for services a task needs (database, broker), print
+the `podman run ...` command for the host, or ask the user to run
+`aibox podman enable` and restart the session. Do not try to get around it.
+
+With nested podman ENABLED, `podman run` works here. Use full image names
+(`docker.io/library/postgres:16`). Inner containers share this sandbox's
+network and egress allowlist, and images persist per project. Do not use
+`-p`: the network is shared, so a service is already on `localhost`.
+
+For registry work, use **skopeo**. It needs no daemon:
 
 ```bash
 skopeo inspect docker://quay.io/org/img:tag
@@ -256,9 +264,9 @@ The registry domain must be allowlisted in proxy mode.
 
 ## Installing things
 
-- `sudo` works only when the session was started with `--allow-pkg`. Do not
-  try it otherwise. Ask the user to restart with that flag, or install
-  in user space.
+- `sudo` works only when the session was started with `--allow-pkg` or has
+  nested podman ENABLED. Do not try it otherwise. Ask the user to restart
+  with `--allow-pkg`, or install in user space.
 - Python: `uv` / `python -m venv` in the project, or `pip install --user`.
   For something that must survive across sessions, use
   `pip install --target ~/.cache/pylibs` (already on `PYTHONPATH`).

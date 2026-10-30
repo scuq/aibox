@@ -44,6 +44,7 @@ func RecipeHash(cfg config.Config) string {
 	for _, name := range []string{
 		"Containerfile", "entrypoint.sh", "git-shim.sh", "gitconfig", "creds",
 		"claude-links.sh", "ainotes/generate-image-notes.sh", "ainotes/ainotes",
+		"containers/containers.conf", "containers/storage.conf",
 	} {
 		h.Write(assets.Read(name))
 	}
@@ -122,6 +123,8 @@ func WriteContext(dir string, caCertsPath string) error {
 		"claude-links.sh":                 0o755,
 		"ainotes/generate-image-notes.sh": 0o755,
 		"ainotes/ainotes":                 0o755,
+		"containers/containers.conf":      0o644,
+		"containers/storage.conf":         0o644,
 	}
 	// The built-in Claude skills and agents: the whole tree, so adding one
 	// needs no change here.

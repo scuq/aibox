@@ -285,3 +285,38 @@ func TestGitPolicyModes(t *testing.T) {
 		t.Errorf("the shim must be told the mode:\n%s", out)
 	}
 }
+
+func TestNestedPodmanRelaxesRunArgs(t *testing.T) {
+	o := opts(t)
+	out := gen(t, o)
+	for _, unwanted := range []string{"/dev/fuse", "label=disable", "unmask", "aibox-podman-", "AIBOX_NESTED_PODMAN"} {
+		if strings.Contains(out, unwanted) {
+			t.Errorf("default devcontainer must not contain %q", unwanted)
+		}
+	}
+
+	o.Config.Security.AllowNestedPodman = true
+	out = gen(t, o)
+	for _, gone := range []string{`"--cap-drop=ALL"`, `"--security-opt=no-new-privileges"`} {
+		if strings.Contains(out, gone) {
+			t.Errorf("nested podman should drop %s", gone)
+		}
+	}
+	for _, want := range []string{
+		`"--device=/dev/fuse"`,
+		`"--security-opt=label=disable"`,
+		`"--security-opt=unmask=/proc/*"`,
+		"source=aibox-podman-a81f728bc9ef,target=/home/aibox/.local/share/containers,type=volume",
+		`"AIBOX_NESTED_PODMAN": "1"`,
+		`"--network=aibox-internal"`,
+		`"--pids-limit=2048"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("nested podman devcontainer missing %s:\n%s", want, out)
+		}
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(commentLine.ReplaceAllString(out, "")), &parsed); err != nil {
+		t.Errorf("not valid JSON with nested podman on: %v", err)
+	}
+}

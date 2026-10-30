@@ -148,6 +148,14 @@ type SecurityConfig struct {
 	NoNewPrivileges     bool `yaml:"noNewPrivileges"`
 	DropCapabilities    bool `yaml:"dropCapabilities"`
 	PidsLimit           int  `yaml:"pidsLimit"`
+	// AllowNestedPodman lets podman run inside the container. It relaxes
+	// no-new-privileges and cap-drop=ALL (newuidmap and the inner runtime need
+	// both gone), adds /dev/fuse, disables label confinement, unmasks /proc and
+	// mounts a per-project storage volume. Off by default. Deliberately not a
+	// config-file key: .aibox.yaml sits in the workspace, where the agent could
+	// switch this on for its own next session. It comes only from the host-side
+	// marker ('aibox podman enable'), AIBOX_ALLOW_PODMAN or --allow-podman.
+	AllowNestedPodman bool `yaml:"-"`
 }
 
 type EgressConfig struct {

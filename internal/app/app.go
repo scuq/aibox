@@ -57,6 +57,8 @@ COMMANDS
                       project init). Inside the container: 'ainotes'
     handoff           Print the session's HANDOFF.md and the exact git commands
                       to run — printed, never executed (--diff | --clear)
+    podman            Nested podman for this workspace, off by default
+                      (enable | disable | status)
     init              Write a .aibox.yaml skeleton into the workspace
     config show       Print the resolved configuration (--json for JSON)
     status            Show image, volume and egress state for this workspace
@@ -73,6 +75,8 @@ RUN OPTIONS (before the assistant name)
                           sidecar. 'aibox egress denied' shows what was blocked;
                           git over SSH does not work in this mode
         --allow-pkg       Enable sudo apt-get inside (relaxes two hardening flags)
+        --allow-podman    Enable nested podman for this run only (relaxes the
+                          same two flags and more; see 'aibox podman enable')
         --seed-creds      Copy the host's assistant login into the auth volume,
                           replacing any login already there. Off by default: the
                           container logs in on its own, so the host refresh token
@@ -102,7 +106,7 @@ ENVIRONMENT
     Only AIBOX_-prefixed variables are read: AIBOX_WORKSPACE, AIBOX_IMAGE,
     AIBOX_EGRESS, AIBOX_EGRESS_SUBNET, AIBOX_PROXY_IMAGE, AIBOX_MEMORY,
     AIBOX_CPUS, AIBOX_RO=1, AIBOX_ALLOW_PKG=1, AIBOX_ALLOW_ROOT=1,
-    AIBOX_AUTOBUILD=0. ANTHROPIC_API_KEY / OPENAI_API_KEY are forwarded into
+    AIBOX_ALLOW_PODMAN=0|1, AIBOX_AUTOBUILD=0. ANTHROPIC_API_KEY / OPENAI_API_KEY are forwarded into
     the container (by name, never by value) when set.
 
 CONFIGURATION
@@ -149,6 +153,8 @@ func Main(args []string) int {
 		err = cmdHandoff(p, args[1:])
 	case "config":
 		err = cmdConfig(args[1:])
+	case "podman":
+		err = cmdPodman(ctx, p, rt, args[1:])
 	case "init":
 		err = cmdInit(p, args[1:])
 	case "status":

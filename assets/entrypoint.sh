@@ -220,6 +220,11 @@ if [ -d /run/aibox ] && [ -w /run/aibox ]; then
                     printf 'Git identity: NONE forwarded — ask the user for name and email before\nthe first commit, then pass them with -c user.name=… -c user.email=….\n'
                 fi ;;
         esac
+        if [ "${AIBOX_NESTED_PODMAN:-}" = "1" ]; then
+            printf 'Containers: nested podman ENABLED (see Containers above).\n'
+        else
+            printf 'Containers: none — podman will not work this session.\n'
+        fi
         if [ -s /run/aibox/services.json ]; then
             printf 'Relay services (reach by name, the port is fixed per service):\n'
             # Names only; the backend stays hidden unless a service disclosed it.

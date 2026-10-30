@@ -92,6 +92,12 @@ func AuthVolumeName(assistant string) string {
 	return fmt.Sprintf("aibox-auth-%s", assistant)
 }
 
+// PodmanVolumeName is the per-project storage volume for nested podman. Per
+// project so one project's images and containers stay invisible to another.
+func PodmanVolumeName(projectID string) string {
+	return fmt.Sprintf("aibox-podman-%s", projectID)
+}
+
 // CacheVolumeName is the shared toolchain-cache volume (Go modules and build
 // cache, pip/uv wheels, npm). One volume for everything: nothing in it is
 // precious, and without it every ephemeral run starts by re-downloading the

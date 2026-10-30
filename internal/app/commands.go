@@ -124,6 +124,7 @@ func cmdStatus(ctx context.Context, p *output.Printer, rt *runtime.Podman, args 
 		ImageInfo string     `json:"imageState"`
 		Volumes   []volState `json:"volumes"`
 		Egress    string     `json:"egress"`
+		Podman    bool       `json:"nestedPodman"`
 	}{
 		Version:   Version,
 		Workspace: ws,
@@ -154,6 +155,10 @@ func cmdStatus(ctx context.Context, p *output.Printer, rt *runtime.Podman, args 
 		volNames = append(volNames, project.AuthVolumeName("codex"), project.ConfigVolumeName("codex", projectID))
 	}
 	volNames = append(volNames, project.CacheVolumeName)
+	config.ApplyNestedPodman(&cfg, projectID)
+	if cfg.Security.AllowNestedPodman {
+		volNames = append(volNames, project.PodmanVolumeName(projectID))
+	}
 	for _, v := range volNames {
 		exists := false
 		if podman {
@@ -169,6 +174,7 @@ func cmdStatus(ctx context.Context, p *output.Printer, rt *runtime.Podman, args 
 		}
 	}
 
+	st.Podman = cfg.Security.AllowNestedPodman
 	if *jsonOut {
 		return output.JSON(st)
 	}
@@ -185,8 +191,16 @@ func cmdStatus(ctx context.Context, p *output.Printer, rt *runtime.Podman, args 
 	}
 	fmt.Printf("  limits    : memory=%s cpus=%s\n", orNone(cfg.Runtime.Memory), orNone(cfg.Runtime.CPUs))
 	fmt.Printf("  egress    : %s\n", st.Egress)
+	fmt.Printf("  podman    : %s\n", onOff(st.Podman))
 	fmt.Printf("  git       : history=%s (%s)\n", cfg.Git.History, gitHistorySummary(cfg.Git.History))
 	return nil
+}
+
+func onOff(on bool) string {
+	if on {
+		return "on"
+	}
+	return "off"
 }
 
 func orNone(s string) string {

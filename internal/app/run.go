@@ -29,6 +29,7 @@ type runOptions struct {
 	egressMode  string
 	readOnly    bool
 	allowPkg    bool
+	allowPodman bool
 	seedCreds   bool
 	seedConfig  bool
 	memory      string
@@ -50,6 +51,7 @@ func newRunFlagSet(o *runOptions) *flag.FlagSet {
 	fs.StringVar(&o.egressMode, "egress", "", "egress mode: open | proxy")
 	fs.BoolVar(&o.readOnly, "ro", false, "mount the workspace read-only")
 	fs.BoolVar(&o.allowPkg, "allow-pkg", false, "enable sudo apt-get inside")
+	fs.BoolVar(&o.allowPodman, "allow-podman", false, "enable nested podman for this run")
 	fs.BoolVar(&o.seedCreds, "seed-creds", false, "copy the host login into the auth volume")
 	fs.BoolVar(&o.seedConfig, "seed-config", false, "copy host Claude settings in")
 	fs.StringVar(&o.memory, "memory", "", `memory cap ("none" disables)`)
@@ -79,6 +81,9 @@ func applyRunFlags(cfg *config.Config, o *runOptions) {
 	}
 	if o.allowPkg {
 		cfg.Security.AllowPackageInstall = true
+	}
+	if o.allowPodman {
+		cfg.Security.AllowNestedPodman = true
 	}
 	if o.memory != "" {
 		cfg.Runtime.Memory = o.memory
@@ -226,6 +231,11 @@ func composeSpec(in sessionInputs) (*container.Spec, error) {
 	mounts = append(mounts, container.Mount{
 		Type: container.MountVolume, Source: project.CacheVolumeName, Dest: "/home/aibox/.cache",
 	})
+	if cfg.Security.AllowNestedPodman {
+		mounts = append(mounts, container.Mount{
+			Type: container.MountVolume, Source: project.PodmanVolumeName(in.ProjectID), Dest: container.NestedPodmanStorage,
+		})
+	}
 	// The host-shared scratch mount, read-write. Outside the git repo, owned by
 	// the host user via the keep-id mapping so files pass cleanly both ways.
 	if in.EphemeralHostPath != "" {
@@ -264,6 +274,9 @@ func composeSpec(in sessionInputs) (*container.Spec, error) {
 		container.EnvVar{Name: "AIBOX_EGRESS_MODE", Value: cfg.Egress.Mode},
 		container.EnvVar{Name: "AIBOX_GIT_HISTORY", Value: cfg.Git.History},
 	)
+	if cfg.Security.AllowNestedPodman {
+		env = append(env, container.EnvVar{Name: "AIBOX_NESTED_PODMAN", Value: "1"})
+	}
 	// The host's git identity, as four variables — never the gitconfig file.
 	env = append(env, in.GitIdentity.Env()...)
 
@@ -303,10 +316,17 @@ func composeSpec(in sessionInputs) (*container.Spec, error) {
 
 	// Hardening. --allow-pkg relaxes the two flags that block `sudo apt-get`.
 	// Installs land in the container's throwaway layer; the userns mapping
-	// means /work edits still come out owned by the caller.
-	if !cfg.Security.AllowPackageInstall {
+	// means /work edits still come out owned by the caller. Nested podman
+	// relaxes the same two: newuidmap needs them gone, and the inner runtime
+	// needs the capabilities. It stays rootless, and the pids/memory/cpu caps
+	// and the network apply to everything it starts.
+	if !cfg.Security.AllowPackageInstall && !cfg.Security.AllowNestedPodman {
 		spec.NoNewPrivileges = cfg.Security.NoNewPrivileges
 		spec.CapDropAll = cfg.Security.DropCapabilities
+	}
+	if cfg.Security.AllowNestedPodman {
+		spec.Devices = container.NestedPodmanDevices
+		spec.SecurityOpts = container.NestedPodmanSecurityOpts
 	}
 
 	if cfg.Egress.Mode == "proxy" {
@@ -428,6 +448,7 @@ func cmdRun(ctx context.Context, p *output.Printer, rt *runtime.Podman, args []s
 		p.Error("%s", err)
 		return 1
 	}
+	config.ApplyNestedPodman(&cfg, projectID)
 
 	// Rootless podman without a delegated memory controller cannot apply
 	// --memory/--cpus; it errors out rather than ignoring them, so drop the
@@ -545,7 +566,7 @@ func cmdRun(ctx context.Context, p *output.Printer, rt *runtime.Podman, args []s
 		p.Error("%s", err)
 		return 1
 	}
-	if err := ensureVolumes(ctx, rt, p, asst, projectID, ws); err != nil {
+	if err := ensureVolumes(ctx, rt, p, asst, projectID, ws, cfg.Security.AllowNestedPodman); err != nil {
 		p.Error("%s", err)
 		return 1
 	}
@@ -650,7 +671,7 @@ func hostCredentialsPath(asst assistant.Assistant) string {
 
 // ensureVolumes creates the assistant's config/auth volumes and the shared
 // cache volume, labelled so listing and pruning never has to guess from names.
-func ensureVolumes(ctx context.Context, rt runtime.Runtime, p *output.Printer, asst assistant.Assistant, projectID, workspace string) error {
+func ensureVolumes(ctx context.Context, rt runtime.Runtime, p *output.Printer, asst assistant.Assistant, projectID, workspace string, nestedPodman bool) error {
 	ensure := func(name, kind string, extra map[string]string) error {
 		exists, err := rt.VolumeExists(ctx, name)
 		if err != nil || exists {
@@ -676,6 +697,15 @@ func ensureVolumes(ctx context.Context, rt runtime.Runtime, p *output.Printer, a
 		if err := ensure(project.ConfigVolumeName(name, projectID), container.VolumeConfig,
 			map[string]string{
 				container.LabelAssistant:   name,
+				container.LabelProjectID:   projectID,
+				container.LabelProjectPath: workspace,
+			}); err != nil {
+			return err
+		}
+	}
+	if nestedPodman {
+		if err := ensure(project.PodmanVolumeName(projectID), container.VolumePodman,
+			map[string]string{
 				container.LabelProjectID:   projectID,
 				container.LabelProjectPath: workspace,
 			}); err != nil {

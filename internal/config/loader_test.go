@@ -180,3 +180,74 @@ func TestValidateServices(t *testing.T) {
 		t.Errorf("valid services should pass: %v", err)
 	}
 }
+
+func TestNestedPodmanMarker(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	const id = "abcdef123456"
+	cfg := Defaults()
+	ApplyNestedPodman(&cfg, id)
+	if cfg.Security.AllowNestedPodman {
+		t.Error("nested podman must be off without a marker")
+	}
+
+	if err := SetNestedPodman(id, true); err != nil {
+		t.Fatal(err)
+	}
+	ApplyNestedPodman(&cfg, id)
+	if !cfg.Security.AllowNestedPodman {
+		t.Error("the marker should enable nested podman")
+	}
+	if NestedPodmanEnabled("000000000000") {
+		t.Error("a marker must apply to its own project only")
+	}
+
+	if err := SetNestedPodman(id, false); err != nil {
+		t.Fatal(err)
+	}
+	// Removing an absent marker is not an error.
+	if err := SetNestedPodman(id, false); err != nil {
+		t.Fatal(err)
+	}
+	if NestedPodmanEnabled(id) {
+		t.Error("disable should remove the marker")
+	}
+}
+
+func TestNestedPodmanEnvOverridesMarker(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	const id = "abcdef123456"
+	if err := SetNestedPodman(id, true); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(EnvAllowPodman, "0")
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ApplyNestedPodman(&cfg, id)
+	if cfg.Security.AllowNestedPodman {
+		t.Error("AIBOX_ALLOW_PODMAN=0 should beat the marker")
+	}
+
+	t.Setenv(EnvAllowPodman, "1")
+	if cfg, err = Load(""); err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Security.AllowNestedPodman {
+		t.Error("AIBOX_ALLOW_PODMAN=1 should enable nested podman")
+	}
+}
+
+// The workspace is writable from inside the container, so no file in it may
+// be able to enable nested podman.
+func TestNestedPodmanIsNotAConfigKey(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	ws := t.TempDir()
+	doc := "version: 1\nsecurity:\n  allowNestedPodman: true\n"
+	if err := os.WriteFile(filepath.Join(ws, ProjectConfigName), []byte(doc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(ws); err == nil {
+		t.Error("a config file must not be able to set allowNestedPodman")
+	}
+}

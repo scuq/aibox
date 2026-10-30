@@ -44,6 +44,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python-is-python3 \
         python3-paramiko \
         skopeo \
+        podman \
+        crun \
+        uidmap \
+        libcap2-bin \
+        fuse-overlayfs \
         lua5.4 \
         liblua5.4-dev \
         luarocks \
@@ -68,7 +73,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # python3-paramiko comes from apt rather than pip so the system interpreter
 # can import it out of the box without a venv. skopeo inspects and copies
 # images straight to and from registries without a daemon or local storage.
-# It is not a container runtime and does not change the "no podman here" rule.
+# podman, crun, uidmap and fuse-overlayfs are always here but do nothing by
+# default: under no-new-privileges + cap-drop=ALL newuidmap cannot map ids, so
+# podman fails at startup. 'aibox podman enable' lifts those two flags for one
+# project. No slirp4netns or passt: inner containers use the outer network.
 
 # Custom CA certificates, e.g. a corporate root or a TLS-inspecting proxy's
 # CA. The build context always contains a ca-certificates/ directory; aibox
@@ -300,8 +308,8 @@ RUN set -eu; \
 
 # Passwordless apt for the aibox user. This is inert by default: the runtime
 # runs with no-new-privileges + cap-drop=ALL, which blocks sudo entirely. It
-# only takes effect when aibox is run with --allow-pkg, which relaxes those
-# two flags. Scoped to package tooling rather than a blanket ALL.
+# only takes effect when aibox is run with --allow-pkg or nested podman, which
+# relax those two flags. Scoped to package tooling rather than a blanket ALL.
 RUN echo 'aibox ALL=(root) NOPASSWD: /usr/bin/apt-get, /usr/bin/apt, /usr/bin/dpkg' \
         > /etc/sudoers.d/aibox-apt \
     && chmod 0440 /etc/sudoers.d/aibox-apt
@@ -313,11 +321,28 @@ RUN echo 'aibox ALL=(root) NOPASSWD: /usr/bin/apt-get, /usr/bin/apt, /usr/bin/dp
 RUN find / -xdev -perm /6000 -type f ! -path /usr/bin/sudo \
         -exec chmod ug-s {} + 2>/dev/null || true
 
+# newuidmap and newgidmap lost their setuid bit above and get one file
+# capability each instead, for nested podman. Setuid root does not work here:
+# the kernel also requires the writer of uid_map to own the target namespace
+# or hold CAP_SYS_ADMIN, and a setuid process runs as root rather than as the
+# owner (aibox). With a file capability it stays aibox. Same as
+# quay.io/podman/stable, and just as inert under NoNewPrivs + cap-drop=ALL.
+RUN setcap cap_setuid=ep /usr/bin/newuidmap \
+    && setcap cap_setgid=ep /usr/bin/newgidmap
+
 # The node image ships a uid/gid 1000 user called "node". Rename it to
 # "aibox"; the runtime's --userns=keep-id:uid=1000,gid=1000 aims the host user
 # at this uid, whatever the host user's own uid happens to be.
 RUN groupmod -n aibox node \
     && usermod -l aibox -d /home/aibox -m node
+
+# Subordinate ids for nested podman: every id the outer keep-id mapping gives
+# this container, except 0 and aibox's own 1000. Unused unless nested podman
+# is enabled. The two config files carry the nested defaults (host network
+# namespace, no cgroups, fuse-overlayfs).
+RUN printf 'aibox:1:999\naibox:1001:64535\n' > /etc/subuid \
+    && cp /etc/subuid /etc/subgid
+COPY containers/ /etc/containers/
 
 # Both assistant CLIs are baked in; which one runs (and which auth/config
 # volumes are mounted) is decided per invocation by `aibox run`. The image is
@@ -355,11 +380,13 @@ COPY gitconfig /home/aibox/.gitconfig
 # /vscode/vscode-server: Permission denied" (cap-drop=ALL means nothing in the
 # container can chown it later). .cache is the mountpoint for the cache volume
 # — the Go module cache, pip/uv wheels and npm's cache, which would otherwise
-# be re-downloaded on every ephemeral run.
+# be re-downloaded on every ephemeral run. .local/share/containers is the
+# mountpoint for the nested podman storage volume.
 RUN mkdir -p /work /vscode \
         /home/aibox/.claude /home/aibox/.claude-auth \
         /home/aibox/.codex /home/aibox/.codex-auth \
         /home/aibox/.cache /home/aibox/.npm-global \
+        /home/aibox/.local/share/containers \
     && chown -R aibox:aibox /work /vscode /home/aibox \
     && chmod 700 /home/aibox/.claude /home/aibox/.claude-auth \
                  /home/aibox/.codex /home/aibox/.codex-auth

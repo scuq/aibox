@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -102,6 +103,7 @@ func applyEnv(cfg *Config) {
 	str("AIBOX_CPUS", &cfg.Runtime.CPUs)
 	boolish("AIBOX_ALLOW_ROOT", &cfg.Runtime.AllowRoot)
 	boolish("AIBOX_ALLOW_PKG", &cfg.Security.AllowPackageInstall)
+	boolish(EnvAllowPodman, &cfg.Security.AllowNestedPodman)
 	boolish("AIBOX_AUTOBUILD", &cfg.Image.Autobuild)
 	if v, ok := os.LookupEnv("AIBOX_RO"); ok && (v == "1" || v == "true") {
 		cfg.Runtime.WorkspaceMode = "read-only"
@@ -115,4 +117,61 @@ func Render(cfg Config) (string, error) {
 		return "", err
 	}
 	return string(out), nil
+}
+
+// EnvAllowPodman overrides the 'aibox podman enable' marker in either
+// direction: =1 turns nested podman on, =0 turns it off.
+const EnvAllowPodman = "AIBOX_ALLOW_PODMAN"
+
+// NestedPodmanPath is the host-side marker for 'aibox podman enable'. It lives
+// beside the user config and never in the workspace, so nothing inside the
+// container can create it.
+func NestedPodmanPath(projectID string) string {
+	cfgPath := UserConfigPath()
+	if cfgPath == "" {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(cfgPath), "projects", projectID, "nested-podman")
+}
+
+// NestedPodmanEnabled reports whether the project's marker exists.
+func NestedPodmanEnabled(projectID string) bool {
+	path := NestedPodmanPath(projectID)
+	if path == "" {
+		return false
+	}
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// SetNestedPodman creates or removes the project's marker.
+func SetNestedPodman(projectID string, on bool) error {
+	path := NestedPodmanPath(projectID)
+	if path == "" {
+		return errors.New("cannot locate the user config directory")
+	}
+	if !on {
+		if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	content := "Created by 'aibox podman enable' on " + time.Now().UTC().Format(time.RFC3339) + ".\n"
+	return os.WriteFile(path, []byte(content), 0o600)
+}
+
+// ApplyNestedPodman folds the marker into a loaded config. Load cannot do this
+// itself: the project ID is derived from the workspace after Load returns. It
+// only ever turns the setting on, so a --allow-podman flag already applied
+// survives, and it stands aside when EnvAllowPodman decided the value.
+func ApplyNestedPodman(cfg *Config, projectID string) {
+	if _, set := os.LookupEnv(EnvAllowPodman); set {
+		return
+	}
+	if NestedPodmanEnabled(projectID) {
+		cfg.Security.AllowNestedPodman = true
+	}
 }

@@ -26,6 +26,12 @@ environment notes for the agent.
 
 ### Added
 
+- Nested podman, off by default. Run `aibox podman enable | disable | status`
+  for a project, or pass `--allow-podman` for one run. `AIBOX_ALLOW_PODMAN=1|0`
+  overrides the stored state. The mode drops `no-new-privileges` and
+  `cap-drop=ALL`, so `sudo apt-get` also works. The session stays rootless.
+  It is not a `.aibox.yaml` key. Run `aibox devcontainer create --force` after
+  a change. Unit tests only, no real run yet.
 - `gh` and `glab` in the image, pinned and checksummed per architecture.
   Forge writes are allowed under the same ask-first rule; tokens come from
   `/creds` per command. `api.github.com`, `uploads.github.com` and

@@ -170,6 +170,11 @@ func Generate(o Options) (string, error) {
 	mounts = append(mounts, container.Mount{
 		Type: container.MountVolume, Source: project.CacheVolumeName, Dest: "/home/aibox/.cache",
 	})
+	if cfg.Security.AllowNestedPodman {
+		mounts = append(mounts, container.Mount{
+			Type: container.MountVolume, Source: project.PodmanVolumeName(o.ProjectID), Dest: container.NestedPodmanStorage,
+		})
+	}
 	if o.EphemeralHostPath != "" {
 		mounts = append(mounts, container.Mount{
 			Type: container.MountBind, Source: o.EphemeralHostPath, Dest: o.EphemeralMount,
@@ -204,8 +209,19 @@ func Generate(o Options) (string, error) {
 `)
 	}
 	w("        \"--userns=keep-id:uid=1000,gid=1000\",\n")
-	w("        \"--security-opt=no-new-privileges\",\n")
-	w("        \"--cap-drop=ALL\",\n")
+	if cfg.Security.AllowNestedPodman {
+		w("        // 'aibox podman enable': nested podman needs these two hardening flags\n")
+		w("        // gone and the options below. Still rootless, on the same network.\n")
+		for _, d := range container.NestedPodmanDevices {
+			w("        %q,\n", "--device="+d)
+		}
+		for _, s := range container.NestedPodmanSecurityOpts {
+			w("        %q,\n", "--security-opt="+s)
+		}
+	} else {
+		w("        \"--security-opt=no-new-privileges\",\n")
+		w("        \"--cap-drop=ALL\",\n")
+	}
 	w("        \"--pids-limit=%d\",\n", cfg.Security.PidsLimit)
 	// The labels are what let 'aibox devcontainer stop|remove|status' own this
 	// container's lifecycle even though VS Code created it. Cleanup queries
@@ -254,6 +270,9 @@ func Generate(o Options) (string, error) {
 		// `aibox run` sets; the host gitconfig file is never mounted.
 		for _, e := range o.GitIdentity.Env() {
 			w(",\n        %q: %q", e.Name, e.Value)
+		}
+		if cfg.Security.AllowNestedPodman {
+			w(",\n        \"AIBOX_NESTED_PODMAN\": \"1\"")
 		}
 		w("\n    },\n")
 	}

@@ -736,6 +736,38 @@ authorization, the device's own AAA still has to be right; no content
 inspection (encrypted end-to-end, by design); `maxConns` is not rate limiting
 (an agent can open, close, and reopen).
 
+### 8.11.1 Nested podman
+
+Nested podman is an opt-in mode. A session that does not enable it has exactly
+the previous flags. `aibox podman enable` sets it per project. `--allow-podman`
+sets it for one run. `AIBOX_ALLOW_PODMAN=1|0` overrides the stored state.
+
+The mode is not a `.aibox.yaml` key. That file is in `/work`, which the agent
+can write. A key would let the agent enable the mode for its own next session.
+The marker is on the host at
+`$XDG_CONFIG_HOME/aibox/projects/<projectID>/nested-podman`.
+A `.aibox.yaml` that sets the key is rejected.
+
+**Relaxes:** `no-new-privileges` and `cap-drop=ALL` (the container gets
+podman's default capability set, without `SYS_ADMIN`). It adds
+`--device /dev/fuse`, `--security-opt label=disable`, and
+`--security-opt unmask=/proc/*`. It mounts the volume `aibox-podman-<projectID>`
+at `~/.local/share/containers`. `sudo apt-get` also works, because it depends
+on the same two dropped flags.
+
+**Holds:** the session stays rootless, so a process that gets more capability
+is still an unprivileged user on the host. The pids, memory, and cpu limits
+still apply. Inner containers use the outer network namespace. The egress
+proxy and the internal network apply to them.
+
+In proxy mode, registry hosts are not in the base allowlist. Add them with
+`aibox egress allow HOST`. The devcontainer reads the setting when aibox
+generates it, so run `aibox devcontainer create --force` after a change.
+Nested podman was tested with rootless podman 5.4.2 outside and 4.3.1 inside.
+`newuidmap` and `newgidmap` use file capabilities, not setuid: the kernel
+requires the writer of `uid_map` to own the namespace or hold `CAP_SYS_ADMIN`.
+The devcontainer path has not had a real run.
+
 ### 8.12 Preserved from bclaude
 
 Sidecar addresses derived arithmetically from the subnet (squid `.2`, relay

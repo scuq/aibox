@@ -34,6 +34,11 @@ func PolicyLayer(cfg config.Config) string {
 	default:
 		b.WriteString("Git: writable — ask the user before every commit, push or tag (see\nRepository writes).\n")
 	}
+	if cfg.Security.AllowNestedPodman {
+		b.WriteString("Containers: nested podman ENABLED (see Containers above).\n")
+	} else {
+		b.WriteString("Containers: none — podman will not work this session.\n")
+	}
 	if len(cfg.Services) > 0 {
 		b.WriteString("Relay services (reach by name, the port is fixed per service):\n")
 		for _, s := range cfg.Services {

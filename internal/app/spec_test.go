@@ -163,6 +163,51 @@ func TestRunSpecAllowPkgRelaxesHardening(t *testing.T) {
 	}
 }
 
+func TestRunSpecNestedPodman(t *testing.T) {
+	in := testInputs(t)
+	in.Config.Security.AllowNestedPodman = true
+	argv := argvString(t, in, false)
+	for _, gone := range []string{"--cap-drop=ALL", "no-new-privileges"} {
+		if strings.Contains(argv, gone) {
+			t.Errorf("nested podman should drop %q:\n%s", gone, argv)
+		}
+	}
+	for _, want := range []string{
+		"--device /dev/fuse",
+		"--security-opt label=disable",
+		"--security-opt unmask=/proc/*",
+		"--volume aibox-podman-abcdef123456:/home/aibox/.local/share/containers ",
+		"--env AIBOX_NESTED_PODMAN=1",
+		// the caps and the workload user mapping survive
+		"--pids-limit 2048",
+		"--memory 4g --memory-swap 4g",
+		"--userns=keep-id:uid=1000,gid=1000",
+	} {
+		if !strings.Contains(argv, want) {
+			t.Errorf("nested podman argv missing %q:\n%s", want, argv)
+		}
+	}
+}
+
+func TestRunSpecNestedPodmanOffByDefault(t *testing.T) {
+	argv := argvString(t, testInputs(t), false)
+	for _, unwanted := range []string{"/dev/fuse", "label=disable", "unmask", "aibox-podman-", "AIBOX_NESTED_PODMAN"} {
+		if strings.Contains(argv, unwanted) {
+			t.Errorf("default run must not contain %q:\n%s", unwanted, argv)
+		}
+	}
+}
+
+func TestRunSpecNestedPodmanKeepsProxyNetwork(t *testing.T) {
+	in := testInputs(t)
+	in.Config.Security.AllowNestedPodman = true
+	in.Config.Egress.Mode = "proxy"
+	argv := argvString(t, in, false)
+	if !strings.Contains(argv, "--network aibox-internal") {
+		t.Errorf("nested podman must not change the network:\n%s", argv)
+	}
+}
+
 func TestRunSpecNoLimits(t *testing.T) {
 	in := testInputs(t)
 	in.Config.Runtime.Memory = ""

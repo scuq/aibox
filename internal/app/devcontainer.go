@@ -93,6 +93,7 @@ func devcontainerCreate(p *output.Printer, args []string) error {
 	if err != nil {
 		return err
 	}
+	config.ApplyNestedPodman(&cfg, projectID)
 
 	// The Dev Container is the environment; assistants are selectable
 	// components — create does not implicitly mean Claude, Codex, or both.
