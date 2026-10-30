@@ -36,4 +36,4 @@ jobs:
       - name: Install shellcheck
         run: sudo apt-get update && sudo apt-get install -y shellcheck
       - name: Lint the aibox container shell
-        run: shellcheck -S warning assets/entrypoint.sh assets/git-shim.sh assets/ainotes/generate-image-notes.sh assets/ainotes/ainotes
+        run: shellcheck -S warning assets/entrypoint.sh assets/git-shim.sh assets/ainotes/generate-image-notes.sh assets/ainotes/ainotes internal/app/completion.bash

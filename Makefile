@@ -44,7 +44,8 @@ staticcheck:
 # inside every container aibox starts.
 shellcheck:
 	shellcheck -S warning assets/entrypoint.sh assets/git-shim.sh \
-	    assets/ainotes/generate-image-notes.sh assets/ainotes/ainotes
+	    assets/ainotes/generate-image-notes.sh assets/ainotes/ainotes \
+	    internal/app/completion.bash
 
 check: fmt-check vet test
 

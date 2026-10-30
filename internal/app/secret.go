@@ -23,7 +23,8 @@ import (
 //	aibox secret list                the names (never the values)
 //	aibox secret delete NAME
 //	aibox secret allow-access [--ttl 10m]   temporarily expose the passphrase
-//	aibox secret revoke-access       remove it now
+//	aibox secret revoke-access       remove it now and end every running allow-access
+//	aibox secret revoke-all          the same
 //	aibox secret rotate-key          new key, re-encrypt all (after a leak)
 func cmdSecret(ctx context.Context, p *output.Printer, args []string) error {
 	sub := ""
@@ -100,11 +101,15 @@ func cmdSecret(ctx context.Context, p *output.Printer, args []string) error {
 		}
 		return allowAccess(ctx, p, *ttl)
 
-	case "revoke-access":
+	case "revoke-access", "revoke-all":
+		if !secret.AccessGranted() {
+			p.Info("no access is open")
+			return nil
+		}
 		if err := secret.RevokeAccess(); err != nil {
 			return err
 		}
-		p.Good("revoked", "the passphrase is no longer exposed")
+		p.Good("revoked", "the passphrase is no longer exposed; every running allow-access exits")
 		return nil
 
 	case "rotate-key":
@@ -118,7 +123,7 @@ func cmdSecret(ctx context.Context, p *output.Printer, args []string) error {
 		return nil
 
 	default:
-		return fmt.Errorf("unknown secret subcommand %q (add | list | delete | allow-access | revoke-access | rotate-key)", sub)
+		return fmt.Errorf("unknown secret subcommand %q (add | list | delete | allow-access | revoke-access | revoke-all | rotate-key)", sub)
 	}
 }
 
@@ -144,7 +149,7 @@ func readSecretValue(p *output.Printer, name string) (string, error) {
 // allowAccess exposes the passphrase, then holds it open for ttl (or until
 // interrupted) and revokes on exit. Foreground and blocking on purpose: the
 // grant lives exactly as long as the user keeps this command running, and a
-// crash or Ctrl-C closes it.
+// crash or Ctrl-C closes it. A revoke from another terminal also ends it.
 func allowAccess(ctx context.Context, p *output.Printer, ttl time.Duration) error {
 	names, _ := secret.List()
 	if len(names) == 0 {
@@ -163,19 +168,42 @@ func allowAccess(ctx context.Context, p *output.Printer, ttl time.Duration) erro
 
 	sigCtx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	var timeout <-chan time.Time
-	if ttl > 0 {
-		t := time.NewTimer(ttl)
-		defer t.Stop()
-		timeout = t.C
-	}
-	select {
-	case <-sigCtx.Done():
-	case <-timeout:
+	if waitGrant(sigCtx, ttl) {
+		p.Good("revoked", "another aibox command closed access; the passphrase is no longer exposed")
+		return nil
 	}
 	if err := secret.RevokeAccess(); err != nil {
 		return err
 	}
 	p.Good("revoked", "access closed; the passphrase is no longer exposed")
 	return nil
+}
+
+// grantPollInterval is how fast a held grant notices a revoke from elsewhere.
+const grantPollInterval = 500 * time.Millisecond
+
+// waitGrant blocks until ctx ends, ttl passes, or the passphrase disappears,
+// and reports whether it disappeared. The passphrase file is the grant, so
+// every running allow-access watches it: one revoke ends all of them.
+func waitGrant(ctx context.Context, ttl time.Duration) bool {
+	var timeout <-chan time.Time
+	if ttl > 0 {
+		t := time.NewTimer(ttl)
+		defer t.Stop()
+		timeout = t.C
+	}
+	poll := time.NewTicker(grantPollInterval)
+	defer poll.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-timeout:
+			return false
+		case <-poll.C:
+			if !secret.AccessGranted() {
+				return true
+			}
+		}
+	}
 }

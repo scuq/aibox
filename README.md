@@ -95,6 +95,10 @@ aibox run claude|codex|shell [args…]      ephemeral session (--rm)
     --allow-podman nested podman, this run only
     --memory / --cpus / --no-limits             --dry-run     print podman argv
 
+aibox stop-all [--dry-run]                stop every running aibox container in
+                                          all projects, sidecars included;
+                                          volumes and networks stay
+
 aibox net up | down | status              stand up/tear down the whole
                                           topology: aibox-internal (no route
                                           out) + aibox-egress networks, squid
@@ -132,8 +136,10 @@ aibox ephemeral [shell | clear] [--json]  the /ephemeral scratch mount shared
 aibox secret add NAME                      encrypted credentials at /creds (value
 aibox secret list [--json] | delete NAME   read from a prompt/stdin, never argv)
 aibox secret allow-access [--ttl 10m]      temporarily expose the passphrase so
-aibox secret revoke-access                 the container can decrypt; rotate-key
-aibox secret rotate-key                    re-encrypts all after a leak
+aibox secret revoke-all | revoke-access    the container can decrypt; revoke-all
+aibox secret rotate-key                    removes it and ends every running
+                                           allow-access; rotate-key re-encrypts
+                                           all after a leak
 
 aibox podman enable | disable | status [-w DIR]
                                           nested podman for this project,
@@ -143,6 +149,9 @@ aibox notes [--size | --claude-md]        the environment notes
 aibox notes project init                  scaffold .aibox/ainotes.md
 aibox handoff [--diff | --clear]          print HANDOFF.md + the git commands
 aibox init                                write a .aibox.yaml skeleton
+
+aibox completion install                  install bash completion for this user
+aibox completion bash                     print the script
 ```
 
 Every inspection command supports `--json`; every run-shaped command supports
@@ -241,6 +250,10 @@ The master key is auto-generated and never enters the mount; an agent cannot
 grant its own access. If a secret is ever exposed, rotate everything with
 `aibox secret rotate-key`. Encryption is `openssl enc`-compatible
 (AES-256-CBC + PBKDF2), so the in-container helper is just the bundled openssl.
+
+There is one grant per host, shared by all containers. `aibox secret revoke-all`
+closes it, and every `allow-access` still running in another terminal exits
+within a second. `revoke-access` does the same.
 
 Install from source needs Go ≥ 1.25 and rootless [podman](https://podman.io);
 `make` builds `./aibox`, `make install` copies it to `~/.local/bin`

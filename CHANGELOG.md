@@ -3,6 +3,23 @@
 All notable changes to aibox. The format follows Keep a Changelog; versions
 are semver git tags.
 
+## Unreleased
+
+### Added
+
+- `aibox stop-all [--dry-run]` stops every running aibox container on the
+  host, in all projects, sidecars included. It selects by label. Volumes and
+  networks stay.
+- `aibox secret revoke-all`, an alias of `revoke-access`.
+- `aibox completion bash` prints a bash completion script, and
+  `aibox completion install` installs it for the current user.
+
+### Changed
+
+- A running `aibox secret allow-access` now exits when the grant is revoked
+  from another terminal. Before, it kept waiting for its timer with no access
+  open, and that timer could then close a newer grant.
+
 ## 0.1.0 - 2026-10-26
 
 First tagged release. aibox is a single static Go binary that runs Claude

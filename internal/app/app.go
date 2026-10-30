@@ -24,7 +24,10 @@ COMMANDS
     run claude|codex|shell [args...]
                       Ephemeral session on a workspace (--rm; nothing persists
                       except the named auth/config/cache volumes)
-    net <sub>         Stand up the persistent egress topology: up | down |
+    stop-all          Stop every running aibox container on this host, in all
+                      projects: sessions, devcontainers, squid and the relay
+                      (--dry-run lists them). Volumes and networks stay
+    net <sub>        Stand up the persistent egress topology: up | down |
                       status. 'up' creates the aibox-internal (no route out)
                       and aibox-egress networks, starts squid and the relay on
                       both, and leaves them running so every 'aibox run
@@ -50,9 +53,10 @@ COMMANDS
     secret <sub>      Encrypted credentials mounted read-only at /creds:
                       add NAME (value from a prompt/stdin) | list | delete NAME
                       | allow-access [--ttl] temporarily expose the passphrase
-                      so the container can decrypt | revoke-access | rotate-key.
-                      Encrypted at rest; the container gets ciphertext until you
-                      allow access
+                      so the container can decrypt | revoke-all (or
+                      revoke-access) remove it and end every running
+                      allow-access | rotate-key. Encrypted at rest; the
+                      container gets ciphertext until you allow access
     notes             Print the environment notes (--size | --claude-md |
                       project init). Inside the container: 'ainotes'
     handoff           Print the session's HANDOFF.md and the exact git commands
@@ -63,7 +67,9 @@ COMMANDS
     config show       Print the resolved configuration (--json for JSON)
     status            Show image, volume and egress state for this workspace
     doctor            Check that podman and the host are set up correctly
-    version           Print the aibox version
+    completion <sub>  Bash completion: bash prints the script | install writes
+                      it where bash-completion loads it from
+    version         Print the aibox version
     help              This text
 
 RUN OPTIONS (before the assistant name)
@@ -133,6 +139,10 @@ func Main(args []string) int {
 		fmt.Printf("aibox %s\n", Version)
 	case "run":
 		return cmdRun(ctx, p, rt, args[1:])
+	case "stop-all":
+		err = cmdStopAll(ctx, p, rt, args[1:])
+	case "completion":
+		err = cmdCompletion(p, args[1:])
 	case "image":
 		err = cmdImage(ctx, p, rt, args[1:])
 	case "egress":
